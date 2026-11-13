@@ -1,0 +1,41 @@
+# Dependencies, caches, and generated application packages.
+**/node_modules/
+.cache/
+.npm-cache/
+desktop/renderer/
+desktop/.stage/
+desktop/out/
+desktop/dist/
+/build/
+/dist/
+/out/
+releases/
+*.app/
+*.dmg
+*.pkg
+
+# Local profiles, live diagnostics, screenshots, and acceptance receipts.
+/evidence/
+/APPROVAL.md
+/DESKTOP_MANIFEST.json
+/PROTOTYPE_MANIFEST.json
+/DESKTOP_BUILD.md
+/QA.md
+/LIVE_CONNECTION.md
+/INTERACTIVE_CONNECTION.md
+/ACTIVITY_MONITORING.md
+/RELEASE.md
+/AUDIT_REPORT.md
+
+# Generated test reports and logs.
+coverage/
+test-results/
+playwright-report/
+*.log
+npm-debug.log*
+
+# Machine-local configuration and operating-system files.
+.env
+.env.*
+!.env.example
+.DS_Store

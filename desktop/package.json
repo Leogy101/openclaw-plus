@@ -1,0 +1,36 @@
+{
+  "name": "openclaw-plus-desktop",
+  "productName": "OpenClaw+",
+  "version": "0.7.3",
+  "private": true,
+  "description": "An independent macOS workspace for an existing OpenClaw installation",
+  "main": "src/main.cjs",
+  "author": "OpenClaw+ contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "setup:electron": "install-electron",
+    "build:ui": "node scripts/prepare-ui.cjs",
+    "start": "npm run build:ui && electron .",
+    "package": "node scripts/package.cjs",
+    "test": "node scripts/test.cjs unit",
+    "test:unit": "node scripts/test.cjs unit",
+    "test:native": "node scripts/test.cjs native",
+    "test:prototype": "node scripts/test.cjs prototype",
+    "build:icons": "node scripts/build-icons.cjs"
+  },
+  "devDependencies": {
+    "@electron/fuses": "2.1.3",
+    "@electron/packager": "20.3.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "electron": "45.3.0",
+    "playwright": "1.62.1"
+  },
+  "overrides": {
+    "glob": "14.0.2",
+    "minimatch": "11.0.1"
+  }
+}

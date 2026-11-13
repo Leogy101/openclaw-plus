@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; media-src blob:; font-src 'none'; connect-src 'none'; frame-src 'none'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>OpenClaw+</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="models.css">
+  <script src="app.js" type="module"></script>
+</head>
+<body>
+<div id="app">
+  <header class="titlebar">
+    <div class="row"><button id="toggle-navigation" class="icon-btn" data-action="toggle-navigation" aria-label="Toggle navigation"></button><span class="wordmark">OpenClaw<span class="brand-plus">+</span></span></div>
+    <span class="top-center" id="title-connection">Local OpenClaw · Connecting</span>
+    <div class="row"><span class="pill" id="access-label">OpenClaw workspace</span><button id="quick-open" class="button" data-action="quick-open" aria-label="Quick Open">Search <span class="small">⌘ K</span></button><button id="theme-toggle" class="icon-btn" data-action="theme" aria-label="Switch appearance"></button></div>
+  </header>
+  <div class="shell">
+    <aside class="nav" id="navigation" aria-label="Primary navigation">
+      <button class="button new-chat" data-action="original">Open original OpenClaw ↗</button>
+      <nav class="nav-list" id="primary-nav"></nav>
+      <div class="session-list"><div class="section-heading label">Conversations</div><label class="sr-only" for="session-search">Search gateway conversations</label><input id="session-search" class="session-search" placeholder="Search conversations…" type="search" autocomplete="off"><div id="agent-filter"></div><div id="session-list" aria-live="off"></div></div>
+      <div class="nav-bottom"><button class="nav-item" data-action="view" data-view="Settings">Settings & capabilities</button><button class="connection-btn" id="connection-button" data-action="connection">Local OpenClaw · Connecting</button></div>
+    </aside>
+    <main class="content">
+      <header class="page-header"><div class="grow" id="page-heading"></div><div class="header-actions"><button id="toggle-terminal" class="button" data-action="toggle-terminal" aria-expanded="false" aria-controls="terminal-mount">Terminal</button><button id="toggle-work" class="button" data-action="toggle-work" aria-expanded="false">Work</button></div></header>
+      <div id="connection-notice"></div>
+      <div class="workspace no-panel" id="workspace"><div id="conversation-split" class="conversation-split"><div id="main-region" class="main"></div><div id="terminal-separator" class="terminal-separator" role="separator" aria-label="Resize terminal" aria-controls="terminal-mount main-region" aria-orientation="horizontal" tabindex="0" hidden></div><section id="terminal-mount" class="terminal-mount" aria-label="Conversation terminal" hidden></section></div><button id="sheet-scrim" class="sheet-scrim" data-action="close-work" aria-label="Dismiss Work sheet" hidden></button><aside id="work-panel" class="work-panel" aria-label="Work sidebar" hidden><div class="panel-top"><div class="row spread"><h2>Work</h2><div class="row"><button id="close-work" class="icon-btn" data-action="close-work" aria-label="Close Work sidebar"></button></div></div><div class="panel-tabs"><button class="panel-tab active" data-action="work-tab" data-tab="work" aria-pressed="true">Work</button><button class="panel-tab" data-action="work-tab" data-tab="details" aria-pressed="false">Details</button></div></div><div id="work-scroll" class="work-scroll"><div id="work-content"></div></div><div class="panel-footer"><button class="text-btn" data-action="view" data-view="Activity">Open full Activity →</button><span id="work-freshness">Waiting for observation</span></div></aside></div>
+    </main>
+  </div>
+</div>
+<div id="overlay"></div><div id="toast" role="status" aria-live="polite"></div><div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>
