@@ -30,11 +30,17 @@ function localTarget(home) {
   return { url: `ws://127.0.0.1:${port}`, originalUrl: `http://127.0.0.1:${port}/`, configPath, controlUiBasePath: gateway.controlUi?.basePath || '' };
 }
 
-function classifyFailure(output, timedOut, write = false) {
+function classifyFailure(output, timedOut, write = false, checked = false) {
   let data;
   try { data = JSON.parse(output); } catch { /* Raw CLI errors are never exposed or logged. */ }
   const rawCode = String(data?.error?.code ?? data?.code ?? '').toUpperCase();
   const detail = String(data?.error?.details?.code ?? data?.details?.code ?? data?.error?.reason ?? '').toUpperCase();
+  if(checked&&data?.error?.preflight===true){
+    const error=rawCode==='SESSION_CHANGED'?new ReadError('SESSION_CHANGED','This session changed. Refresh it before sending.'):
+      rawCode==='UNAVAILABLE'?new ReadError('UNAVAILABLE','The current session or supported gateway client is unavailable. Refresh before sending.'):
+      classifyFailure(output,timedOut||rawCode==='TIMEOUT',false);
+    error.preflight=true;return error;
+  }
   if (write) {
     if (/AUTH|PAIR|SCOPE|FORBIDDEN|ACCESS|UNAUTHORIZED/.test(rawCode+detail)) return new ReadError('ACCESS','OpenClaw did not authorize this action. Your existing permissions still apply.');
     if (/ACTIVE.LEAF.CHANGED|SESSION.SETTINGS.CHANGED|CONFLICT|STALE/.test(rawCode+detail)) return new ReadError('CONFLICT','This session or configuration changed. Refresh and review before trying again.');
@@ -57,11 +63,21 @@ class CliTransport {
     this.home = home;
     this.target = target || localTarget(home);
     this.node = node; this.cli = cli; this.approvalHelper = approvalHelper; this.composerHelper = composerHelper; this.modelHelper = modelHelper; this.execute = execute;
+    this.supportsCheckedSend = cli === DEFAULT_CLI;
     this.active = 0; this.queue = []; this.children = new Set(); this.closed = false; this.nextOrder = 0;
     try { this.version = JSON.parse(fs.readFileSync(path.join(path.dirname(cli), 'package.json'), 'utf8')).version; } catch { this.version = undefined; }
   }
   request(method, params = {}) { return this.enqueue(method,params,false); }
   write(method, params = {}) { return this.enqueue(method,params,true); }
+  sendChecked(params) {
+    if(!this.supportsCheckedSend)return Promise.reject(new ReadError('UNAVAILABLE','Checked send is not available on this transport.'));
+    return this.enqueue('chat.send',params,true,undefined,true).catch(error=>{
+      // Admission failure or closing an unstarted queued job cannot have sent.
+      // An owned running helper is already classified UNCERTAIN by drain().
+      if(error instanceof ReadError&&['BUSY','CLOSED'].includes(error.code))error.preflight=true;
+      throw error;
+    });
+  }
   prioritize(method, params = {}) {
     const key=JSON.stringify([method,params]);
     // A cache invalidation can leave an obsolete identical read queued. The
@@ -80,7 +96,7 @@ class CliTransport {
     if (this.cli !== DEFAULT_CLI) return Promise.reject(new ReadError('UNAVAILABLE','The model catalog fixture is not installed.'));
     return this.enqueue('models.list',{},false,operation);
   }
-  enqueue(method, params, write, modelOperation) {
+  enqueue(method, params, write, modelOperation, checked = false) {
     if (!(write ? WRITE_METHODS : READ_METHODS).has(method)) return Promise.reject(new ReadError('DENIED', 'This operation is not allowed on the selected request lane.'));
     const stdin = write && ['chat.send','sessions.patch','config.patch','tts.speak'].includes(method);
     const media = method === 'chat.send' && Array.isArray(params?.attachments) && params.attachments.length > 0;
@@ -90,7 +106,7 @@ class CliTransport {
     if (this.closed) return Promise.reject(new ReadError('CLOSED', 'The connection is closed.'));
     if (this.queue.length > 20) return Promise.reject(new ReadError('BUSY', 'A refresh is already in progress.'));
     return new Promise((resolve, reject) => {
-      const job={method,params,write,stdin,modelOperation,resolve,reject,foreground:write,order:this.nextOrder++,key:write?undefined:JSON.stringify([method,params])};
+      const job={method,params,write,stdin,modelOperation,checked,resolve,reject,foreground:write,order:this.nextOrder++,key:write?undefined:JSON.stringify([method,params])};
       const next=write?this.queue.findIndex(item=>!item.foreground):-1;
       this.queue.splice(next<0?this.queue.length:next,0,job);this.drain();
     });
@@ -99,7 +115,7 @@ class CliTransport {
     while (!this.closed && this.active < 2 && this.queue.length) {
       const job = this.queue.shift(); this.active++;
       const args = job.modelOperation ? [this.modelHelper,job.modelOperation,this.target.url]
-        : job.stdin ? (this.cli===DEFAULT_CLI ? [this.composerHelper,job.method,this.target.url] : [this.cli,'--composer-stdin',job.method,this.target.url])
+        : job.stdin ? (this.cli===DEFAULT_CLI ? [this.composerHelper,job.checked?'chat.send.checked':job.method,this.target.url] : [this.cli,'--composer-stdin',job.method,this.target.url])
         : this.cli===DEFAULT_CLI && APPROVAL_METHODS.has(job.method)
         ? [this.approvalHelper,job.method,this.target.url,JSON.stringify(job.params)]
         : [this.cli, 'gateway', 'call', job.method, '--params', JSON.stringify(job.params),
@@ -112,16 +128,16 @@ class CliTransport {
       for (const name of ['OPENCLAW_SHELL','OPENCLAW_SUBAGENT_EXEC']) if(process.env[name] !== undefined) env[name]=process.env[name];
       let child;
       child = this.execute(this.node, args, { env, shell: false, encoding: 'utf8',
-        timeout: job.method==='tts.speak' ? 140000 : job.write ? 28000 : 18000, maxBuffer: (job.method==='tts.speak' ? 17 : 4) * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+        timeout: job.method==='tts.speak' ? 140000 : job.checked ? 38000 : job.write ? 28000 : 18000, maxBuffer: (job.method==='tts.speak' ? 17 : 4) * 1024 * 1024, windowsHide: true }, (error, stdout) => {
         this.children.delete(child); this.active--;
         if (this.closed) job.reject(job.write ? classifyFailure('',false,true) : new ReadError('CLOSED', 'The connection is closed.'));
-        else if (error) job.reject(classifyFailure(stdout, error.killed || error.code === 'ETIMEDOUT', job.write));
+        else if (error) job.reject(classifyFailure(stdout, error.killed || error.code === 'ETIMEDOUT', job.write, job.checked));
         else {
           try {
             const result = JSON.parse(stdout);
             if (!result || typeof result !== 'object' || result.ok === false && result.error) throw new Error('Invalid reply');
             job.resolve(result);
-          } catch { job.reject(classifyFailure(stdout, false, job.write)); }
+          } catch { job.reject(classifyFailure(stdout, false, job.write, job.checked)); }
         }
         this.drain();
       });

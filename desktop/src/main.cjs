@@ -438,7 +438,8 @@ else {
         return {ok:true,data:await service[operation](params)};
       } catch(error) {
         return {ok:false,error:{code:error instanceof ReadError?error.code:'UNAVAILABLE',
-          message:error instanceof ReadError?error.message:'The request could not be completed. Refresh the view before trying again.',uncertain:error?.uncertain===true}};
+          message:error instanceof ReadError?error.message:'The request could not be completed. Refresh the view before trying again.',uncertain:error?.uncertain===true,
+          notSent:operation==='send'&&error instanceof ReadError&&error.preflight===true&&error.code!=='UNCERTAIN'}};
       }
     });
     createMenu();

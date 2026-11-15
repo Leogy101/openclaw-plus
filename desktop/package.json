@@ -1,7 +1,7 @@
 {
   "name": "openclaw-plus-desktop",
   "productName": "OpenClaw+",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "private": true,
   "description": "An independent macOS workspace for an existing OpenClaw installation",
   "main": "src/main.cjs",

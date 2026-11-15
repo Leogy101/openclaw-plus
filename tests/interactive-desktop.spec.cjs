@@ -16,18 +16,28 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
  await application.evaluate(({ipcMain,shell,clipboard,BrowserWindow})=>{
   BrowserWindow.getAllWindows()[0].setSize(1440,1000);
   const original=ipcMain._invokeHandlers.get('gateway:request');
-  const state=globalThis.__interactiveFixture={received:[],historyReads:[],planMode:'source',holdPlan:false,planReleases:[],planRequests:0,rejectSend:false,holdSend:false,releases:[],holdApprovals:false,approvalReleases:[],approvalRequests:0,lastApprovalItems:[],nativeEffects:[],refreshEvents:0,overviewResponses:0};
+  const state=globalThis.__interactiveFixture={received:[],historyReads:[],planMode:'source',holdPlan:false,planReleases:[],planRequests:0,planReplies:[],scriptedPlanRequests:0,releasePlanOnSend:false,holdHistory:false,historyReleases:[],historyFailure:null,rejectSend:false,holdSend:false,releases:[],holdApprovals:false,approvalReleases:[],approvalRequests:0,lastApprovalItems:[],nativeEffects:[],refreshEvents:0,overviewResponses:0};
   const contents=BrowserWindow.getAllWindows()[0].webContents,send=contents.send.bind(contents);
   contents.send=(channel,event,...rest)=>{if(channel==='gateway:event'&&event?.kind==='sessions')state.refreshEvents++;return send(channel,event,...rest);};
   ipcMain.removeHandler('gateway:request');
   ipcMain.handle('gateway:request',async(event,operation,params)=>{
    if(['send','abort','resolveApproval','saveSettings'].includes(operation))state.received.push({operation,params});
-   if(operation==='history')state.historyReads.push(structuredClone(params));
-   if(operation==='send'&&state.rejectSend){state.rejectSend=false;return {ok:false,error:{code:'CONFLICT',message:'Fixture branch changed',uncertain:false}};}
+   if(operation==='history'){
+    state.historyReads.push(structuredClone(params));
+    if(state.holdHistory)await new Promise(resolve=>state.historyReleases.push(resolve));
+    if(state.historyFailure)return {ok:false,error:{code:state.historyFailure,message:'Fixture history access changed'}};
+   }
+   if(operation==='plan'&&state.planReplies.length){
+    state.scriptedPlanRequests++;const next=state.planReplies.shift();
+    if(next.hold)await new Promise(resolve=>state.planReleases.push(resolve));
+    return next.result;
+   }
+   if(operation==='send'&&state.rejectSend){const error=typeof state.rejectSend==='object'?state.rejectSend:{code:'CONFLICT',message:'Fixture branch changed',uncertain:false};state.rejectSend=false;return {ok:false,error};}
    if(operation==='send'&&state.holdSend)await new Promise(resolve=>state.releases.push(resolve));
    if(operation==='plan'&&state.planMode==='empty'){state.planRequests++;if(state.holdPlan)await new Promise(resolve=>state.planReleases.push(resolve));return {ok:true,data:{card:null}};}
    if(operation==='approvals'){state.approvalRequests++;if(state.holdApprovals)await new Promise(resolve=>state.approvalReleases.push(resolve));}
    const result=await original(event,operation,params);
+   if(operation==='send'&&state.releasePlanOnSend){state.releasePlanOnSend=false;state.planReleases.shift()?.();}
    if(operation==='approvals'&&result?.ok)state.lastApprovalItems=result.data.items;
    if(operation==='overview'&&result?.ok)state.overviewResponses++;
    return result;
@@ -113,6 +123,23 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
   assert.doesNotMatch(await page.locator('#composer-status').textContent(),/unconfirmed/i);
   assert.equal(await page.locator('#composer-input').inputValue(),'Preserve this conflicted draft.');
   assert.equal(count('chat.send'),before);assert.equal(await application.evaluate(()=>globalThis.__interactiveFixture.rejectSend),false);
+ });
+ await check('Proven preflight failure stays unsent and a fresh submission preserves the draft',async()=>{
+  const before=count('chat.send'),start=(await received()).filter(item=>item.operation==='send').length;
+  await page.locator('#composer-input').fill('Keep this preflight draft.');
+  for(let attempt=0;attempt<2;attempt++){
+   await application.evaluate(()=>{globalThis.__interactiveFixture.rejectSend={code:'TIMEOUT',message:'Fixture preflight timed out before sending',uncertain:false,notSent:true};});
+   await page.waitForFunction(()=>!document.querySelector('#send-message').disabled);
+   await page.locator('#composer-input').press('Enter');
+   await page.waitForFunction(()=>document.querySelector('#composer-status')?.textContent.includes('Fixture preflight timed out'));
+   assert.match(await page.locator('#composer-status').textContent(),/Message was not sent/);
+   assert.doesNotMatch(await page.locator('#composer-status').textContent(),/unconfirmed/i);
+   assert.equal(await page.locator('#composer-input').inputValue(),'Keep this preflight draft.');
+   assert.equal(await page.locator('#send-message').getAttribute('aria-label'),'Send message');
+  }
+  const submitted=(await received()).filter(item=>item.operation==='send').slice(start);
+  assert.equal(submitted.length,2);assert.notEqual(submitted[0].params.requestId,submitted[1].params.requestId);
+  assert.equal(count('chat.send'),before);
  });
  await check('Approval review shows command and host and makes no decision until final confirmation',async()=>{
   await application.evaluate(()=>{globalThis.__interactiveFixture.holdApprovals=true;});
@@ -210,6 +237,86 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
   assert.ok(await page.getByText('No task checklist supplied for this conversation.',{exact:true}).isVisible());
   await application.evaluate(()=>{globalThis.__interactiveFixture.planMode='source';});
  });
+ await check('Initial history still gates sending until its exact session has loaded',async()=>{
+  await application.evaluate(()=>{globalThis.__interactiveFixture.holdHistory=true;});
+  await page.locator('#session-list [data-action="session"]').filter({hasText:'Workspace review'}).click();
+  await waitMain(()=>globalThis.__interactiveFixture.historyReleases.length>0);
+  await page.locator('#composer-input').fill('Wait for the initial exact history.');
+  const before=count('chat.send');assert.equal(await page.locator('#send-message').isDisabled(),true);
+  await page.locator('#composer-input').press('Enter');assert.equal(count('chat.send'),before);
+  await application.evaluate(()=>{const state=globalThis.__interactiveFixture;state.holdHistory=false;state.historyReleases.splice(0).forEach(resolve=>resolve());});
+  await page.getByText('Coordinator is coordinating.',{exact:true}).waitFor();
+  await page.waitForFunction(()=>!document.querySelector('#send-message').disabled);
+ });
+ await check('Sending during background history refresh retries an invalidated checklist once without an error flash',async()=>{
+  await page.locator('.source-plan').waitFor();
+  await page.evaluate(()=>{
+   window.__planFlashes=[];
+   window.__planObserver=new MutationObserver(()=>window.__planFlashes.push(document.querySelector('#plan-region').textContent));
+   window.__planObserver.observe(document.querySelector('#plan-region'),{childList:true,subtree:true,characterData:true});
+  });
+  await application.evaluate(()=>{
+   const state=globalThis.__interactiveFixture;state.holdHistory=true;state.scriptedPlanRequests=0;state.releasePlanOnSend=true;
+   state.planReplies=[
+    {hold:true,result:{ok:false,error:{code:'STALE',message:'Fixture read snapshot invalidated by send'}}},
+    {hold:true,result:{ok:true,data:{card:{source:'progress-card',revision:2,updatedAt:1700000001000,steps:[{step:'Fresh checklist after submission',status:'in_progress'}]}}}},
+   ];
+  });
+  await page.waitForTimeout(5200);await publish({kind:'history'});
+  await waitMain(()=>globalThis.__interactiveFixture.historyReleases.length>0&&globalThis.__interactiveFixture.planReleases.length===1);
+  const before=count('chat.send');await page.locator('#composer-input').fill('Send while fixture history is refreshing.');
+  assert.equal(await page.locator('#send-message').isDisabled(),false,'an existing exact history keeps Send available during background reads');
+  await page.locator('#composer-input').press('Enter');
+  await page.waitForFunction(()=>document.querySelector('#composer-status').textContent.includes('Message accepted by OpenClaw.'));
+  await waitMain(()=>globalThis.__interactiveFixture.scriptedPlanRequests===2&&globalThis.__interactiveFixture.planReleases.length===1);
+  assert.equal(count('chat.send'),before+1);
+  assert.match(await page.locator('#plan-region').textContent(),/Implement requested changes/,'the previous verified card remains during the replacement read');
+  assert.doesNotMatch(await page.locator('#plan-region').textContent(),/unavailable|invalidated/i);
+  await application.evaluate(()=>{const state=globalThis.__interactiveFixture;state.holdHistory=false;state.historyReleases.splice(0).forEach(resolve=>resolve());state.planReleases.splice(0).forEach(resolve=>resolve());});
+  await page.getByText('Fresh checklist after submission',{exact:true}).waitFor();
+  assert.equal(await application.evaluate(()=>globalThis.__interactiveFixture.scriptedPlanRequests),2);
+  const flashes=await page.evaluate(()=>{window.__planObserver.disconnect();return window.__planFlashes;});
+  assert.ok(flashes.every(text=>!/unavailable|invalidated/i.test(text)),'no checklist error is rendered, even briefly');
+ });
+ await check('Persistent checklist invalidation is bounded and genuine failures remain visible',async()=>{
+  for(const code of ['STALE','ACCESS','SESSION_CHANGED','UNAVAILABLE']){
+   await application.evaluate((_electron,code)=>{
+    const state=globalThis.__interactiveFixture;state.scriptedPlanRequests=0;
+    state.planReplies=Array.from({length:code==='STALE'?2:1},()=>({result:{ok:false,error:{code,message:'Fixture checklist failure '+code}}}));
+   },code);
+   const target=code==='STALE'||code==='SESSION_CHANGED'?'Other Builder session':'Workspace review';
+   await page.locator('#session-list [data-action="session"]').filter({hasText:target}).click();
+   await page.waitForFunction(code=>document.querySelector('#plan-region').textContent.includes('Task checklist unavailable. Fixture checklist failure '+code),code);
+   assert.equal(await application.evaluate(()=>globalThis.__interactiveFixture.scriptedPlanRequests),code==='STALE'?2:1);
+   if(['ACCESS','SESSION_CHANGED'].includes(code))assert.equal(await page.locator('.source-plan').count(),0);
+  }
+ });
+ await check('A superseded checklist does not retry into another session',async()=>{
+  await application.evaluate(()=>{const state=globalThis.__interactiveFixture;state.scriptedPlanRequests=0;state.planReplies=[{hold:true,result:{ok:false,error:{code:'STALE',message:'Fixture obsolete conversation'}}}];});
+  await page.locator('#session-list [data-action="session"]').filter({hasText:'Other Builder session'}).click();
+  await waitMain(()=>globalThis.__interactiveFixture.planReleases.length===1);
+  await page.locator('#session-list [data-action="session"]').filter({hasText:'Workspace review'}).click();
+  await page.locator('.source-plan').waitFor();
+  await application.evaluate(()=>globalThis.__interactiveFixture.planReleases.shift()());
+  await page.waitForTimeout(400);
+  assert.equal(await application.evaluate(()=>globalThis.__interactiveFixture.scriptedPlanRequests),1);
+  assert.doesNotMatch(await page.locator('#plan-region').textContent(),/obsolete|unavailable/i);
+ });
+ await check('A hard history failure keeps sending disabled until a successful exact-session refresh',async()=>{
+  await page.locator('#composer-input').fill('Preserve draft across denied history.');
+  await application.evaluate(()=>{globalThis.__interactiveFixture.historyFailure='ACCESS';});
+  await publish({kind:'history'});
+  await page.waitForFunction(()=>document.querySelector('#messages').textContent.includes('Fixture history access changed'));
+  assert.equal(await page.locator('#send-message').isDisabled(),true);
+  const before=count('chat.send');await page.locator('#composer-input').press('Enter');assert.equal(count('chat.send'),before);
+  await application.evaluate(()=>{globalThis.__interactiveFixture.historyFailure=null;globalThis.__interactiveFixture.holdHistory=true;});
+  await page.locator('#messages [data-action="refresh-history"]').click();
+  await waitMain(()=>globalThis.__interactiveFixture.historyReleases.length>0);
+  assert.equal(await page.locator('#send-message').isDisabled(),true,'starting a read cannot clear a known access failure');
+  await application.evaluate(()=>{const state=globalThis.__interactiveFixture;state.holdHistory=false;state.historyReleases.splice(0).forEach(resolve=>resolve());});
+  await page.waitForFunction(()=>!document.querySelector('#send-message').disabled);
+  assert.equal(await page.locator('#composer-input').inputValue(),'Preserve draft across denied history.');
+ });
  await check('Fixture renderer makes no network requests or script errors and never opens native external content',async()=>{
   assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
   assert.deepEqual(await application.evaluate(()=>globalThis.__interactiveFixture.nativeEffects),[]);
@@ -217,7 +324,7 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
   assert.equal(await page.locator('#messages script,#messages img').count(),0);
  });
  }finally{
-  await application.evaluate(()=>{globalThis.__interactiveFixture?.releases.splice(0).forEach(resolve=>resolve());globalThis.__interactiveFixture?.approvalReleases.splice(0).forEach(resolve=>resolve());globalThis.__interactiveFixture?.planReleases.splice(0).forEach(resolve=>resolve());}).catch(()=>{});
+  await application.evaluate(()=>{globalThis.__interactiveFixture?.releases.splice(0).forEach(resolve=>resolve());globalThis.__interactiveFixture?.approvalReleases.splice(0).forEach(resolve=>resolve());globalThis.__interactiveFixture?.planReleases.splice(0).forEach(resolve=>resolve());globalThis.__interactiveFixture?.historyReleases.splice(0).forEach(resolve=>resolve());}).catch(()=>{});
   fs.writeFileSync(path.join(evidence,'interactive-tests.json'),JSON.stringify({at:new Date().toISOString(),checks,errors,requests,profile,scope:'Native Electron fixture CLI only; isolated profile, no production configuration, credentials or gateway'},null,2));
   await application.close();
  }

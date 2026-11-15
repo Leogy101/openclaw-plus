@@ -1,6 +1,11 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const { ReadError } = require('./gateway-cli.cjs');
+const { assertSession: checkSession } = require('./composer-rpc.cjs');
+function assertSession(row,input,sending=false) {
+  try { return checkSession(row,input,sending); }
+  catch(error) { throw new ReadError(error.code,error.message); }
+}
 
 const OPERATIONS = new Set(['plan', 'send', 'abort']);
 const MAX_REQUESTS = 128;
@@ -148,11 +153,7 @@ class ConversationActions {
   async describe(input, generation, foreground = false) {
     const result = await this.readFresh('sessions.describe', { key: input.key, agentId: input.agentId }, foreground);
     this.base.assertCurrent(generation);
-    const row = result?.session;
-    if (!object(row) || row.sessionId !== input.sessionId || row.agentId !== undefined && row.agentId !== input.agentId) {
-      fail('SESSION_CHANGED', 'This session is missing, inaccessible, or replaced. Select it again from the refreshed list.');
-    }
-    return row;
+    return assertSession(result?.session,input);
   }
   async plan(input) {
     const generation = this.base.generation;
@@ -218,8 +219,11 @@ class ConversationActions {
   }
   async sendBound(input, record) {
     const generation = this.base.generation;
-    const before = await this.describe(input, generation, true);
-    if (before.archived === true) fail('UNAVAILABLE', 'This session is archived. Restore it in OpenClaw before sending.');
+    // The standard known-leaf path performs the same fresh identity/archive check
+    // inside the existing short-lived helper, reusing one SDK initialization.
+    const checked=input.expectedLeafEntryId!==undefined&&this.base.transport.supportsCheckedSend===true&&typeof this.base.transport.sendChecked==='function';
+    const before=checked?undefined:await this.describe(input,generation,true);
+    if(before)assertSession(before,input,true);
     if (!record.params) {
       let leaf = input.expectedLeafEntryId;
       if (leaf === undefined) {
@@ -243,7 +247,7 @@ class ConversationActions {
     }
     this.base.assertCurrent(generation);
     try {
-      const reply = await this.base.transport.write('chat.send', { ...record.params });
+      const reply = await (checked?this.base.transport.sendChecked({ ...record.params }):this.base.transport.write('chat.send', { ...record.params }));
       this.base.assertCurrent(generation);
       record.result = normalizeSendReceipt(reply, input.requestId);
       record.uncertain = false;
@@ -253,7 +257,7 @@ class ConversationActions {
       return copyReceipt(record.result);
     } catch (error) {
       this.base.invalidate();
-      if (['INVALID', 'DENIED', 'ACCESS', 'CONFLICT'].includes(error.code)) throw error;
+      if (['INVALID', 'DENIED', 'ACCESS', 'CONFLICT'].includes(error.code)||checked&&error.preflight===true) throw error;
       const uncertain = new ReadError('UNCERTAIN', 'Message delivery is unconfirmed. Refresh the conversation; retry only this same submission identity.');
       uncertain.requestId = input.requestId;
       throw uncertain;

@@ -184,3 +184,20 @@ test('Full permission requests alone use admin scope and cannot carry model or u
  assert.deepEqual(validatePrivateRequest('sessions.patch',legacy),['operator.admin']);
  for(const invalid of [{...pinned,model:'provider/model'},{...pinned,thinkingLevel:'high'},{...pinned,expectedPermissionMode:undefined},{...pinned,permissionMode:'skip'},{...pinned,expectedLifecycleRevision:''},{...pinned,expectedLifecycleRevision:null},{...legacy,expectedSessionId:undefined}])assert.throws(()=>validatePrivateRequest('sessions.patch',invalid));
 });
+
+test('checked sends preserve definite no-spawn admission failures and distinguish queued close from active close',async()=>{
+ const full=queuedTransport();
+ const reads=Array.from({length:23},(_,offset)=>full.cli.request('sessions.list',{offset}).catch(error=>error.code));
+ await assert.rejects(full.cli.sendChecked({idempotencyKey:'overflow'}),error=>error.code==='BUSY'&&error.preflight===true);
+ assert.equal(full.started.length,2);full.cli.close();await Promise.all(reads);
+ await assert.rejects(full.cli.sendChecked({idempotencyKey:'closed'}),error=>error.code==='CLOSED'&&error.preflight===true);
+ assert.equal(full.started.length,2);
+ const queued=queuedTransport();
+ const activeReads=[queued.cli.request('agents.list').catch(error=>error.code),queued.cli.request('sessions.list').catch(error=>error.code)];
+ const unsent=queued.cli.sendChecked({idempotencyKey:'queued'});
+ queued.cli.close();await assert.rejects(unsent,error=>error.code==='CLOSED'&&error.preflight===true);await Promise.all(activeReads);
+ assert.equal(queued.started.length,2);
+ const running=queuedTransport();const uncertain=running.cli.sendChecked({idempotencyKey:'active'});running.cli.close();
+ await assert.rejects(uncertain,error=>error.code==='UNCERTAIN'&&error.preflight!==true);
+ assert.equal(running.started.length,1);
+});

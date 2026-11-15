@@ -4,7 +4,7 @@
 
 An independent macOS desktop workspace for an existing OpenClaw installation. OpenClaw remains the runtime and source of truth; OpenClaw+ provides a focused interface for conversations, agent activity and terminal work.
 
-**OpenClaw+ is an independent, unofficial project, not the official OpenClaw application.** Version **0.7.6** includes a personal Models workspace for the native published catalog, local model references, and a handoff to OpenClaw provider setup. Qualification and routing remain unavailable.
+**OpenClaw+ is an independent, unofficial project, not the official OpenClaw application.** Version **0.7.7** includes a personal Models workspace for the native published catalog, local model references, and a handoff to OpenClaw provider setup. Qualification and routing remain unavailable.
 
 ## Features
 
@@ -84,7 +84,7 @@ Right-click the message box for the native Undo, Redo, Cut, Copy, Paste and Sele
 
 Question detection uses the latest bounded history and earlier messages you explicitly load. Observed pending questions remain available while that conversation is open, even as newer messages arrive. The app does not scan the entire transcript automatically; after reopening a long conversation, use **Load earlier messages** to review questions outside the current history window. Refreshing new questions while browsing earlier history preserves your place.
 
-Message submission, its required session checks and the first refresh after acceptance take priority over queued background reads. Requests already running finish normally, and the app keeps the same two-request concurrency limit. Gateway processing and connection time still affect confirmation; **Sending** changes to accepted only after OpenClaw returns a receipt.
+Message submission, its required session checks and the first refresh after acceptance take priority over queued background reads. Background conversation refreshes keep Send available after the exact conversation has loaded; known access or session changes block it until a verified refresh. For a known conversation branch, the fresh session check and send share one short-lived OpenClaw client startup. Requests already running finish normally, and the app keeps the same two-request concurrency limit. Gateway processing and connection time still affect confirmation; **Sending** changes to accepted only after OpenClaw returns a receipt. A checklist refresh invalidated by a send retries once without flashing an error; persistent failures remain visible.
 
 Choose **Read aloud** beside **Copy** on an assistant report to hear its prose. The same button stops playback, including while audio is being prepared. Long reports play in sequential chunks; fenced code, hidden reasoning and tool output are excluded. Reading uses OpenClaw’s configured speech provider, which receives the report text; configure it in original OpenClaw if unavailable. The app does not change providers or credentials and does not fall back to browser voices. Stopping discards late audio and prevents later chunks, but cannot undo a speech request already sent to the provider.
 

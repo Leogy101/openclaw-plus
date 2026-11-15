@@ -30,7 +30,7 @@ const state = {
   view:'Conversations', connection:{status:'connecting',label:'Local OpenClaw'}, agents:[], sessions:[],
   page:{offset:0,limit:50,total:0,hasMore:false}, overviewReady:false, overviewLoading:false, overviewError:'', overviewStale:false, query:'', agentId:'',
   questionHistory:null, questionLoading:false, questionError:'', questionReadAt:0, questionProjection:{pending:[],statuses:[]},
-  selected:null, history:null, historyLoading:false, historyError:'', historyExtended:false, historyStale:false, work:null, workLoading:false, workError:'',
+  selected:null, history:null, historyLoading:false, historyError:'', historySendBlocked:false, historyExtended:false, historyStale:false, work:null, workLoading:false, workError:'',
   workContext:null, scope:'conversation', panel:viewWidth() >= 1280, panelTab:'work', processId:null,
   runningSessions:[], runningUpdatedAt:null, runningError:'', automations:null, automationLoading:false, automationError:'',
   limits:[], stack:[], theme:desktop?.initialTheme === 'light' ? 'light' : 'dark', navOpen:false, navHidden:false,
@@ -113,7 +113,7 @@ const isActive = session => session?.hasActiveRun === true || session?.hasActive
 const rpc = async (operation,params={}) => {
   if(!desktop?.gateway)throw new Error('The desktop gateway bridge is unavailable. Open this interface from OpenClaw+.');
   const result=await desktop.gateway(operation,params);
-  if(result?.ok!==true){const error=new Error(result?.error?.message||'The workspace request could not be completed.');error.code=result?.error?.code||'UNAVAILABLE';error.uncertain=result?.error?.uncertain===true;throw error;}
+  if(result?.ok!==true){const error=new Error(result?.error?.message||'The workspace request could not be completed.');error.code=result?.error?.code||'UNAVAILABLE';error.uncertain=result?.error?.uncertain===true;error.notSent=result?.error?.notSent===true;throw error;}
   return result.data;
 };
 const announce = message => { $('announcer').textContent = message; };
@@ -563,6 +563,7 @@ async function loadHistory({older=false,initial=false,latest=false,animate=false
     if(generation!==requests.history||selectionId!==identity(state.selected))return;
     if(!helperHistoryMatches(selected,data)){rememberHelperTasks(selected,null);renderWork();}
     if((data.key&&data.key!==selected.key)||(selected.sessionId&&data.sessionId&&data.sessionId!==selected.sessionId))throw Object.assign(new Error('This session identity changed after selection. No replacement conversation was opened.'),{code:'SESSION_CHANGED'});
+    state.historySendBlocked=false;
     const messages=Array.isArray(data.messages)?data.messages:[];
     if(older&&previous){state.history={...data,pageSize:messages.length,messages:[...new Map([...messages,...previous.messages].map(item=>[item.id,item])).values()],hasActiveRun:data.hasActiveRun??previous.hasActiveRun,inFlight:data.inFlight??previous.inFlight};state.historyExtended=true;}
     else state.history={...data,pageSize:messages.length,messages};
@@ -571,7 +572,7 @@ async function loadHistory({older=false,initial=false,latest=false,animate=false
     rememberHelperTasks(state.selected,state.history);
     retainReadAloudReport();renderHistory({initial,older,follow:animate});renderWork();
     if(state.restoreOrigin){const origin=state.restoreOrigin;state.restoreOrigin=null;requestAnimationFrame(()=>{cancelTranscriptMotion();$('transcript')?.scrollTo(0,origin.scroll);$('work-scroll')?.scrollTo(0,origin.workScroll);if(origin.focus)document.querySelector(origin.focus)?.focus({preventScroll:true});});}
-  } catch(error){if(generation===requests.history&&selectionId===identity(state.selected)){state.historyError=errorText(error);if(!older)state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code)){state.questionHistory=null;state.questionProjection={pending:[],statuses:[]};state.questionError=errorText(error);}if(error.code==='SESSION_CHANGED'){rememberHelperTasks(selected,null);renderWork();}}}
+  } catch(error){if(generation===requests.history&&selectionId===identity(state.selected)){state.historyError=errorText(error);if(!older)state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code)){state.historySendBlocked=true;state.questionHistory=null;state.questionProjection={pending:[],statuses:[]};state.questionError=errorText(error);}if(error.code==='SESSION_CHANGED'){rememberHelperTasks(selected,null);renderWork();}}}
   finally {if(generation===requests.history&&selectionId===identity(state.selected)){state.historyLoading=false;renderHistory();}}
 }
 async function loadLatestQuestions({force=false}={}) {
@@ -583,7 +584,7 @@ async function loadLatestQuestions({force=false}={}) {
     if(generation!==requests.questions||key!==identity(state.selected))return;
     if(data.key!==selected.key||selected.sessionId&&data.sessionId!==selected.sessionId)throw Object.assign(new Error('This conversation changed. Refresh its latest messages before answering.'),{code:'SESSION_CHANGED'});
     rememberQuestionHistory(data,Array.isArray(data.messages)?data.messages:[]);state.questionError='';projectQuestions();
-  }catch(error){if(generation===requests.questions&&key===identity(state.selected)){state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code))state.questionProjection={pending:[],statuses:[]};}}
+  }catch(error){if(generation===requests.questions&&key===identity(state.selected)){state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code)){state.historySendBlocked=true;state.questionProjection={pending:[],statuses:[]};}}}
   finally{if(generation===requests.questions&&key===identity(state.selected)){state.questionLoading=false;state.questionReadAt=Date.now();renderHistory();}}
 }
 async function loadWork() {
@@ -621,7 +622,7 @@ function selectSession(item,{child=false,initial=false,dispatchTarget=null}={}) 
   else if(!child)state.stack=[];
   resetAsyncQuestions();
   ++requests.history;++requests.plan;state.plan=null;state.planError='';state.planLoading=false;state.planReadKey=null;state.restoreOrigin=null;state.restoreWork=null;
-  state.selected={...item};state.dispatchTarget=dispatchTarget;state.view='Conversations';state.history=null;state.historyExtended=false;state.historyStale=false;state.historyError='';state.historyLoading=true;state.processId=null;state.navOpen=false;
+  state.selected={...item};state.dispatchTarget=dispatchTarget;state.view='Conversations';state.history=null;state.historyExtended=false;state.historyStale=false;state.historyError='';state.historySendBlocked=false;state.historyLoading=true;state.processId=null;state.navOpen=false;
   if(!child||!state.workContext){++requests.work;state.workContext={...item};state.work=null;state.workError='';}
   pendingRegions.delete('messages');mainShell();replaceRegion('messages','',{force:true});render();
   loadHistory({initial:true});loadPlan();loadActivityForContexts();loadComposerOptions(state.selected);
@@ -636,7 +637,7 @@ function back() {
   stopVoice();
   readAloud?.stop();
   ++requests.history;++requests.work;++requests.plan;state.plan=null;state.planError='';state.planLoading=false;state.planReadKey=null;
-  Object.assign(state,{selected:origin.selected,workContext:origin.workContext,scope:origin.scope,panel:origin.panel,panelTab:origin.panelTab,processId:origin.processId,view:'Conversations',history:null,historyExtended:false,historyStale:false,historyError:'',work:null,restoreOrigin:origin,restoreWork:origin});
+  Object.assign(state,{selected:origin.selected,workContext:origin.workContext,scope:origin.scope,panel:origin.panel,panelTab:origin.panelTab,processId:origin.processId,view:'Conversations',history:null,historyExtended:false,historyStale:false,historyError:'',historySendBlocked:false,work:null,restoreOrigin:origin,restoreWork:origin});
   replaceRegion('messages','',{force:true});render();loadHistory();loadPlan();loadActivityForContexts();loadComposerOptions(state.selected);if(state.panel)loadWork();announce(`Returned to ${nameFor(origin.selected.agentId)}`);
 }
 function openView(view) {if(view!=='Conversations'){readAloud?.stop();stopVoice();}state.view=view;state.navOpen=false;render();$('page-title')?.focus({preventScroll:true});if(view==='Automations')loadAutomations();if(view==='Activity')loadRunning();if(view==='Approvals')loadApprovals({explicit:true});if(view==='Agents')loadActivityForContexts();if(view==='Models')modelsView?.load();}
@@ -759,7 +760,7 @@ async function handleAction(node) {
 }
 
 // Drafts and submitted requests are bound to the full, exact session identity.
-const mutationRejected = error => error?.uncertain!==true&&['ACCESS','INVALID','CONFLICT','STALE','SESSION_CHANGED','DENIED','NOT_FOUND','EXPIRED','UNSUPPORTED','PROTECTED','BUSY','BRANCH_UNKNOWN','RUN_CHANGED'].includes(error?.code);
+const mutationRejected = error => error?.uncertain!==true&&(error?.notSent===true||['ACCESS','INVALID','CONFLICT','STALE','SESSION_CHANGED','DENIED','NOT_FOUND','EXPIRED','UNSUPPORTED','PROTECTED','BUSY','BRANCH_UNKNOWN','RUN_CHANGED'].includes(error?.code));
 const sessionParams = selected => ({key:selected.key,...(selected.agentId?{agentId:selected.agentId}:{}),...(selected.sessionId?{sessionId:selected.sessionId}:{})});
 function draftFor(selected=state.selected) {const key=identity(selected);if(!drafts.has(key))drafts.set(key,{text:'',revision:0,attachments:[]});return drafts.get(key);}
 function composerRecord(selected=state.selected) {
@@ -914,7 +915,7 @@ function renderComposer() {
   const runIds=Array.isArray(state.history?.activeRunIds)?state.history.activeRunIds:[];
   const busy=record.saving||record.picking;
   const retry=uncertain&&!send.asyncReplyKey;
-  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historyLoading&&!pending&&!busy&&!record.uncertain&&(!uncertain||retry)&&(retry||Boolean(draft.text.trim())||draft.attachments.length>0);
+  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historySendBlocked&&!pending&&!busy&&!record.uncertain&&(!uncertain||retry)&&(retry||Boolean(draft.text.trim())||draft.attachments.length>0);
   const disabled=!online()||!state.selected||frozen||busy;
   const models=options?.models||[],model=models.find(item=>item.value===options?.current?.model),levels=model?.thinkingLevels||[];
   const unavailableModel=options?.current?.model&&!model;
@@ -935,12 +936,12 @@ function renderComposer() {
   renderVoiceStatus();renderAsyncQuestionDock();
 }
 async function sendMessage() {
-  if(!state.selected||!online())return;
+  if(!state.selected||!online()||state.historySendBlocked)return;
   const selected={...state.selected},key=identity(selected),draft=draftFor(selected);
   let request=sends.get(key);
   if(request?.status==='sending'||request?.status==='uncertain'&&request.asyncReplyKey||composerRecord(selected).saving||composerRecord(selected).picking||composerRecord(selected).uncertain)return;
   if(request?.status!=='uncertain') {
-    if((!draft.text.trim()&&!draft.attachments.length)||!state.history||state.historyLoading)return;
+    if((!draft.text.trim()&&!draft.attachments.length)||!state.history)return;
     request={selected,message:draft.text,attachmentIds:draft.attachments.map(item=>item.id),draftRevision:draft.revision,requestId:crypto.randomUUID(),expectedLeafEntryId:state.history.leafEntryId,status:'sending'};
     sends.set(key,request);
   }
@@ -992,7 +993,17 @@ async function loadPlan({force=false}={}) {
   state.planReadKey=key;
   const generation=++requests.plan;
   state.planLoading=true;state.planError='';renderPlan();
-  try{const data=await rpc('plan',sessionParams(selected));if(generation===requests.plan&&key===identity(state.selected))state.plan=data;}
+  try{
+    // A send invalidates older read snapshots. Refresh that obsolete snapshot
+    // once without flashing an error or replacing the last verified checklist.
+    for(let attempt=0;attempt<2;attempt++){
+      try{const data=await rpc('plan',sessionParams(selected));if(generation===requests.plan&&key===identity(state.selected))state.plan=data;break;}
+      catch(error){
+        if(generation!==requests.plan||key!==identity(state.selected))return;
+        if(error.code!=='STALE'||attempt>0||!online())throw error;
+      }
+    }
+  }
   catch(error){if(generation===requests.plan&&key===identity(state.selected)){state.planError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code))state.plan=null;}}
   finally{if(generation===requests.plan&&key===identity(state.selected)){state.planLoading=false;state.planReadAt=Date.now();renderPlan();}}
 }

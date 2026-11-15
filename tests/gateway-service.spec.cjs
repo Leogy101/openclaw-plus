@@ -20,7 +20,7 @@ function deferred() {
   return {promise,resolve,reject};
 }
 
-test('a send promotes the existing queued metadata read without duplicating polling or bypassing identity checks',async()=>{
+test('the fallback send promotes a queued metadata read without duplicating polling or bypassing identity checks',async()=>{
   const {ConversationActions}=require('../desktop/src/gateway-conversation.cjs');
   const started=[];
   const transport=new CliTransport({home:'/fixture',target:{url:'ws://127.0.0.1:19999',configPath:'/fixture/openclaw.json'},
@@ -28,6 +28,7 @@ test('a send promotes the existing queued metadata read without duplicating poll
       const call={method:args.includes('gateway')?args[3]:args[1],finish:data=>done(null,JSON.stringify(data))};started.push(call);
       return {kill(){},stdin:{on(){},end(value){call.params=JSON.parse(value);}}};
     }});
+  transport.supportsCheckedSend=false; // Exercise the retained separate-preflight compatibility path.
   const service=new GatewayService(transport),actions=new ConversationActions(service);
   const background=[service.read('agents.list',{}),service.read('sessions.list',{}),service.read('cron.list',{})];
   const polling=service.read('sessions.describe',{key:selected.key,agentId:selected.agentId},0);
