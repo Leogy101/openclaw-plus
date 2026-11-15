@@ -12,7 +12,7 @@ function identifier(value, max = 1024) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/u.test(value);
 }
 function validate(operation, input) {
-  const extra = { plan: [], send: ['message', 'requestId', 'expectedLeafEntryId', 'attachmentIds'], abort: ['runId'] };
+  const extra = { plan: [], send: ['message', 'requestId', 'expectedLeafEntryId', 'attachmentIds', 'replyToId'], abort: ['runId'] };
   if (!OPERATIONS.has(operation) || !object(input)) fail('INVALID', 'Invalid conversation action.');
   const fields = ['key', 'agentId', 'sessionId', ...extra[operation]];
   if (Object.keys(input).some(key => !fields.includes(key)) ||
@@ -20,6 +20,9 @@ function validate(operation, input) {
     fail('INVALID', 'Select an exact agent session before continuing.');
   }
   if (operation === 'send') {
+    if (input.replyToId !== undefined && (!identifier(input.replyToId,512) || input.replyToId.trim() !== input.replyToId)) {
+      fail('INVALID', 'Invalid question reply target.');
+    }
     if (input.attachmentIds !== undefined && (!Array.isArray(input.attachmentIds) || input.attachmentIds.length > 4 ||
         input.attachmentIds.some(value => !identifier(value,128)) || new Set(input.attachmentIds).size !== input.attachmentIds.length)) fail('INVALID','Choose at most four valid attachments.');
     if (typeof input.message !== 'string' || !input.message.trim() && !input.attachmentIds?.length || Buffer.byteLength(input.message, 'utf8') > 16384) {
@@ -135,8 +138,15 @@ class ConversationActions {
     if (operation === 'abort') return this.abort(input);
     return this.plan(input);
   }
-  async describe(input, generation) {
-    const result = await this.base.read('sessions.describe', { key: input.key, agentId: input.agentId }, 0);
+  readFresh(method, params, foreground = false) {
+    const pending=this.base.read(method,params,0);
+    // Promote a matching queued read, including one already shared with polling.
+    // Running reads keep their worker; authentication and freshness checks are unchanged.
+    if(foreground)this.base.transport.prioritize?.(method,params);
+    return pending;
+  }
+  async describe(input, generation, foreground = false) {
+    const result = await this.readFresh('sessions.describe', { key: input.key, agentId: input.agentId }, foreground);
     this.base.assertCurrent(generation);
     const row = result?.session;
     if (!object(row) || row.sessionId !== input.sessionId || row.agentId !== undefined && row.agentId !== input.agentId) {
@@ -168,7 +178,7 @@ class ConversationActions {
     const signature = createHash('sha256').update(JSON.stringify([
       input.key, input.agentId, input.sessionId, input.message,
       input.expectedLeafEntryId === undefined ? { unknown: true } : input.expectedLeafEntryId,
-      input.attachmentIds || [],
+      input.attachmentIds || [], input.replyToId ?? null,
     ])).digest('hex');
     let record = this.submissions.get(input.requestId);
     if (record && record.signature !== signature) fail('INVALID', 'This submission identity already belongs to a different message or session.');
@@ -208,26 +218,27 @@ class ConversationActions {
   }
   async sendBound(input, record) {
     const generation = this.base.generation;
-    const before = await this.describe(input, generation);
+    const before = await this.describe(input, generation, true);
     if (before.archived === true) fail('UNAVAILABLE', 'This session is archived. Restore it in OpenClaw before sending.');
     if (!record.params) {
       let leaf = input.expectedLeafEntryId;
       if (leaf === undefined) {
-        const history = await this.base.read('chat.history', { sessionKey: input.key, agentId: input.agentId,
-          limit: 1, maxBytes: 32768, toolResultMaxChars: 1 }, 0);
+        const history = await this.readFresh('chat.history', { sessionKey: input.key, agentId: input.agentId,
+          limit: 1, maxBytes: 32768, toolResultMaxChars: 1 }, true);
         this.base.assertCurrent(generation);
         if (history?.sessionId !== input.sessionId || history.windowReset) {
           fail('SESSION_CHANGED', 'This conversation changed. Refresh it before sending.');
         }
         leaf = history.sessionInfo?.activeLeafEntryId;
         if (leaf === undefined) leaf = history.activeLeafEntryId;
-        sameLifecycle(before, await this.describe(input, generation));
+        sameLifecycle(before, await this.describe(input, generation, true));
       }
       if (leaf !== null && !identifier(leaf)) fail('BRANCH_UNKNOWN', 'The current conversation branch is unavailable. Refresh before sending.');
       if (input.attachmentIds?.length && !this.attachments) fail('UNAVAILABLE','Attachments are unavailable in this client.');
       const attachments = input.attachmentIds?.length ? this.attachments.snapshot(input,input.attachmentIds,input.requestId) : undefined;
       record.params = { sessionKey: input.key, agentId: input.agentId, sessionId: input.sessionId,
         message: input.message, idempotencyKey: input.requestId, expectedLeafEntryId: leaf,
+        ...(input.replyToId !== undefined ? { replyToId: input.replyToId } : {}),
         ...(attachments?.length ? { attachments } : {}) };
     }
     this.base.assertCurrent(generation);
@@ -250,7 +261,7 @@ class ConversationActions {
   }
   async abort(input) {
     const generation = this.base.generation;
-    const row = await this.describe(input, generation);
+    const row = await this.describe(input, generation, true);
     if (Array.isArray(row.activeRunIds)) {
       if (row.activeRunIds.some(id => !identifier(id, 512))) fail('UNAVAILABLE', 'OpenClaw returned an unsupported active-run list.');
       if (!row.activeRunIds.includes(input.runId)) fail('RUN_CHANGED', 'This run is no longer in the current active set. Refresh its status.');

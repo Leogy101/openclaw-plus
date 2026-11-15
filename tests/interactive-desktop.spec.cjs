@@ -16,12 +16,13 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
  await application.evaluate(({ipcMain,shell,clipboard,BrowserWindow})=>{
   BrowserWindow.getAllWindows()[0].setSize(1440,1000);
   const original=ipcMain._invokeHandlers.get('gateway:request');
-  const state=globalThis.__interactiveFixture={received:[],planMode:'source',holdPlan:false,planReleases:[],planRequests:0,rejectSend:false,holdSend:false,releases:[],holdApprovals:false,approvalReleases:[],approvalRequests:0,lastApprovalItems:[],nativeEffects:[],refreshEvents:0,overviewResponses:0};
+  const state=globalThis.__interactiveFixture={received:[],historyReads:[],planMode:'source',holdPlan:false,planReleases:[],planRequests:0,rejectSend:false,holdSend:false,releases:[],holdApprovals:false,approvalReleases:[],approvalRequests:0,lastApprovalItems:[],nativeEffects:[],refreshEvents:0,overviewResponses:0};
   const contents=BrowserWindow.getAllWindows()[0].webContents,send=contents.send.bind(contents);
   contents.send=(channel,event,...rest)=>{if(channel==='gateway:event'&&event?.kind==='sessions')state.refreshEvents++;return send(channel,event,...rest);};
   ipcMain.removeHandler('gateway:request');
   ipcMain.handle('gateway:request',async(event,operation,params)=>{
    if(['send','abort','resolveApproval','saveSettings'].includes(operation))state.received.push({operation,params});
+   if(operation==='history')state.historyReads.push(structuredClone(params));
    if(operation==='send'&&state.rejectSend){state.rejectSend=false;return {ok:false,error:{code:'CONFLICT',message:'Fixture branch changed',uncertain:false}};}
    if(operation==='send'&&state.holdSend)await new Promise(resolve=>state.releases.push(resolve));
    if(operation==='plan'&&state.planMode==='empty'){state.planRequests++;if(state.holdPlan)await new Promise(resolve=>state.planReleases.push(resolve));return {ok:true,data:{card:null}};}
@@ -93,6 +94,9 @@ const fixture=()=>fs.existsSync(path.join(profile,'fixture-state.json'))?JSON.pa
   assert.equal(sent[0].sessionKey,'agent:builder:child');assert.equal(sent[0].sessionId,'physical-child');assert.equal(sent[0].agentId,'builder');
   assert.equal(sent[0].expectedLeafEntryId,'leaf-1');assert.equal(sent[0].idempotencyKey,submitted[0].params.requestId);
   assert.equal(sent[0].message,'Fixture-only message for Builder.');assert.equal(await page.locator('#composer-input').inputValue(),'Next Builder draft.');
+  const readback=await application.evaluate(()=>globalThis.__interactiveFixture.historyReads.filter(params=>params.foreground===true));
+  assert.deepEqual(readback,[{key:'agent:builder:child',agentId:'builder',sessionId:'physical-child',offset:0,foreground:true}]);
+  assert.ok(calls().filter(call=>call.method==='chat.history').every(call=>!Object.hasOwn(call.params,'foreground')));
  });
  await check('Shift Enter creates a newline without a request',async()=>{
   const before=(await received()).length;

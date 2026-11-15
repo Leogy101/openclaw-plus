@@ -133,3 +133,34 @@ export function formatAsyncReply(questions, answers) {
     return '> '+title.replace(/[\r\n]/g,' ')+'\n\n'+answers[index];
   }).join('\n\n');
 }
+
+const transcriptToolRoles = new Set(['tool','toolResult','function','function_result']);
+const transcriptDetailTypes = new Set(['tool','tool_use','tool_call','tool_result','toolResult','toolCall','reasoning','thinking']);
+function isToolOnlyMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  if (transcriptToolRoles.has(message.role)) return true;
+  if (message.role !== 'assistant' || message.asyncQuestion != null) return false;
+  if (message.text != null && (typeof message.text !== 'string' || message.text.trim())) return false;
+  if (!Array.isArray(message.blocks) || message.blocks.length === 0) return false;
+  for (const block of message.blocks) if (!block || !transcriptDetailTypes.has(block.type)) return false;
+  return true;
+}
+
+// Group presentation only: keep every original row and its index in transcript order.
+export function groupTranscriptMessages(messages) {
+  const groups = [];
+  for (const [index, message] of messages.entries()) {
+    if (!isToolOnlyMessage(message)) {
+      groups.push({kind:'message',message,index});
+      continue;
+    }
+    let group = groups.at(-1);
+    if (group?.kind !== 'tools') {
+      const identity = typeof message.id === 'string' && message.id ? `id:${message.id}` : `index:${index}`;
+      group = {kind:'tools',id:`transcript-tools:${identity}`,entries:[]};
+      groups.push(group);
+    }
+    group.entries.push({message,index});
+  }
+  return groups;
+}

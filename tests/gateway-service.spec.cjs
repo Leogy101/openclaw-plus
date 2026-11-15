@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GatewayService, validate, sessionRow } = require('../desktop/src/gateway-service.cjs');
-const { READ_METHODS, ReadError } = require('../desktop/src/gateway-cli.cjs');
+const { GatewayService, validate, sessionRow, normalizeMessage } = require('../desktop/src/gateway-service.cjs');
+const { READ_METHODS, ReadError, CliTransport } = require('../desktop/src/gateway-cli.cjs');
 
 const selected = {key:'agent:coordinator:main',agentId:'coordinator',sessionId:'coordinator-1'};
 function fixture(reply) {
@@ -19,6 +19,31 @@ function deferred() {
   const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});
   return {promise,resolve,reject};
 }
+
+test('a send promotes the existing queued metadata read without duplicating polling or bypassing identity checks',async()=>{
+  const {ConversationActions}=require('../desktop/src/gateway-conversation.cjs');
+  const started=[];
+  const transport=new CliTransport({home:'/fixture',target:{url:'ws://127.0.0.1:19999',configPath:'/fixture/openclaw.json'},
+    execute(_node,args,_options,done){
+      const call={method:args.includes('gateway')?args[3]:args[1],finish:data=>done(null,JSON.stringify(data))};started.push(call);
+      return {kill(){},stdin:{on(){},end(value){call.params=JSON.parse(value);}}};
+    }});
+  const service=new GatewayService(transport),actions=new ConversationActions(service);
+  const background=[service.read('agents.list',{}),service.read('sessions.list',{}),service.read('cron.list',{})];
+  const polling=service.read('sessions.describe',{key:selected.key,agentId:selected.agentId},0);
+  const sending=actions.handle('send',{...selected,message:'Fixture message',requestId:'fixture-promoted',expectedLeafEntryId:'fixture-leaf'});
+  assert.equal(started.length,2);
+  started[0].finish({agents:[]});assert.equal(started[2].method,'sessions.describe');
+  started[2].finish({session:{...selected,lifecycleRevision:'fixture-life'}});await polling;
+  await new Promise(resolve=>setImmediate(resolve));
+  started[1].finish({sessions:[]});assert.equal(started[4].method,'chat.send');
+  assert.equal(started.filter(call=>call.method==='sessions.describe').length,1);
+  assert.deepEqual(started[4].params,{sessionKey:selected.key,agentId:selected.agentId,sessionId:selected.sessionId,
+    message:'Fixture message',idempotencyKey:'fixture-promoted',expectedLeafEntryId:'fixture-leaf'});
+  started[3].finish({jobs:[]});await Promise.all(background);
+  started[4].finish({runId:'fixture-promoted',status:'started'});
+  assert.deepEqual(await sending,{runId:'fixture-promoted',status:'started'});transport.close();
+});
 
 test('public views make only bounded read calls; activity filters before pagination',async()=>{
   const {service,calls}=fixture(method=>({
@@ -44,6 +69,22 @@ test('public views make only bounded read calls; activity filters before paginat
   assert.equal(calls.find(x=>x.method==='cron.runs').params.limit,50);
   await service.overview({activeOnly:false});
   assert.equal(Object.hasOwn(calls.at(-1).params,'activeOnly'),false);
+});
+
+test('accepted-message refresh promotes the shared history read without forwarding scheduling flags or weakening session checks',async()=>{
+  const gate=deferred(),{service,calls}=fixture(()=>gate.promise),promoted=[];
+  service.transport.prioritize=(method,params)=>promoted.push({method,params});
+  const polling=service.history(selected),readback=service.history({...selected,foreground:true});
+  assert.equal(calls.length,1,'the readback shares the current polling request');
+  assert.deepEqual(promoted,[calls[0]]);
+  assert.equal(Object.hasOwn(calls[0].params,'foreground'),false);
+  assert.equal(calls[0].params.limit,100);
+  gate.resolve({sessionId:selected.sessionId,messages:[{role:'user',content:'Accepted fixture message'}]});
+  const results=await Promise.all([polling,readback]);
+  assert.equal(results[1].messages[0].text,'Accepted fixture message');
+  await assert.rejects(service.history({...selected,foreground:'true'}),{code:'INVALID'});
+  await assert.rejects(service.history({...selected,sessionId:'replacement',foreground:true}),{code:'SESSION_CHANGED'});
+  assert.equal(calls.length,1);
 });
 
 test('view validation rejects unsupported operations, fields and unbounded inputs',async()=>{
@@ -198,6 +239,54 @@ async function normalized(messages) {
   const {service}=fixture(()=>({sessionId:'coordinator-1',messages}));
   return (await service.history(selected)).messages;
 }
+
+test('history preserves bounded native tool correlation without forwarding runtime metadata',()=>{
+  const call=normalizeMessage({role:'assistant',content:[{type:'toolCall',id:'dispatch-1',name:'spawn_agent',
+    arguments:{arguments:JSON.stringify({task_name:'review_ui',message:'Review the sample UI.'})},privateField:'omit'}]});
+  assert.equal(call.blocks[0].toolCallId,'dispatch-1');
+  assert.equal(call.blocks[0].privateField,undefined);
+  const source={role:'toolResult',toolCallId:'dispatch-1',toolName:'spawn_agent',isError:false,
+    content:[{type:'text',text:JSON.stringify({task_name:'/root/review_ui'})}],
+    __openclaw:{id:'receipt-1',runId:'private-runtime-id'},sessionKey:'unverified-route'};
+  const receipt=normalizeMessage(source);
+  assert.equal(receipt.toolCallId,'dispatch-1');assert.equal(receipt.toolName,'spawn_agent');assert.equal(receipt.isError,false);
+  assert.equal(receipt.runId,undefined);assert.equal(receipt.sessionKey,undefined);assert.equal(receipt.__openclaw,undefined);
+  assert.notEqual(receipt.id,normalizeMessage({...source,toolCallId:'dispatch-2'}).id);
+  assert.equal(normalizeMessage({...source,truncated:true}).truncated,true);
+  assert.equal(normalizeMessage({...source,role:'assistant'}).toolCallId,undefined);
+});
+
+test('invalid tool correlation fields are omitted rather than shortened or coerced',()=>{
+  for(const value of ['', ' padded ', 'bad\nidentifier','x'.repeat(513),{},12]) {
+    const call=normalizeMessage({role:'assistant',content:[{type:'toolCall',id:value,name:'spawn_agent',arguments:{}}]});
+    const receipt=normalizeMessage({role:'toolResult',toolCallId:value,toolName:value,isError:'false',content:'{}'});
+    assert.equal(call.blocks[0].toolCallId,undefined);assert.equal(receipt.toolCallId,undefined);
+    assert.equal(receipt.toolName,undefined);assert.equal(receipt.isError,undefined);
+  }
+});
+
+test('native question evidence retains exact reply binding without exposing identity or runtime payloads',()=>{
+  const raw={role:'user',content:'An answer',__openclaw:{id:'saved-answer',seq:14,replyToId:'saved-question',runId:'answer-run',
+    senderName:'Private sender',senderIdentity:{private:'omit'},transport:{private:'omit'}},provenance:{kind:'external_user',private:'omit'}};
+  assert.deepEqual(normalizeMessage(raw).native,{id:'saved-answer',sequence:14,provenance:'external_user',replyToId:'saved-question',runId:'answer-run'});
+  for(const meta of [{id:'saved-answer'},{id:'saved-answer',seq:0},{id:'bad\nid',seq:1}])assert.equal(normalizeMessage({...raw,__openclaw:meta}).native,undefined);
+  const imported=normalizeMessage({...raw,__openclaw:{...raw.__openclaw,importedFrom:'fixture-import'}});
+  assert.equal(imported.native.imported,true);
+  assert.equal(normalizeMessage({...raw,provenance:{kind:'unrecognized'}}).native.provenance,'other');
+  assert.equal(normalizeMessage({...raw,provenance:'malformed'}).native.provenance,'other');
+  assert.equal(normalizeMessage({...raw,__openclaw:{...raw.__openclaw,replyToId:'bad\nid'}}).native.replyToId,undefined);
+});
+
+test('only explicit native successful terminal evidence can retire an older async reminder',()=>{
+  const raw={role:'assistant',content:'Finished the example.',stopReason:'stop',__openclaw:{id:'terminal',seq:4,runId:'run-2',runTerminal:true}};
+  assert.equal(normalizeMessage(raw).native.terminal,'successful');
+  for(const change of [{stopReason:'error'},{stopReason:'aborted'},{channel:'commentary'},{stopReason:undefined},
+    {openclawAbort:{aborted:true}},{isError:true},{errorMessage:'Fixture failure'},
+    {content:[{type:'toolCall',id:'call-tool',name:'exec',arguments:{}}]}])assert.equal(normalizeMessage({...raw,...change}).native.terminal,'settled');
+  for(const change of [{__openclaw:{...raw.__openclaw,runTerminal:false}},
+    {__openclaw:{...raw.__openclaw,importedFrom:'fixture'}},{provenance:{kind:'inter_session'}},
+    {openclawAsyncDelivery:{itemId:'question',questions:[{title:'Continue?'}]}}])assert.equal(normalizeMessage({...raw,...change}).native.terminal,undefined);
+});
 const questionMessage=(extra={})=>({role:'assistant',content:'I have a question.',timestamp:123,
   __openclaw:{id:'native-message',seq:42},
   openclawAsyncDelivery:{itemId:'call-question',questions:[{title:'Which path?',options:['First','Second']}]},...extra});

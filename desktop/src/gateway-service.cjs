@@ -5,16 +5,43 @@ const text = (value, max = 2000) => typeof value === 'string' ? value.slice(0, m
 const finite = value => Number.isFinite(value) ? value : undefined;
 const array = value => Array.isArray(value) ? value : [];
 const LIMIT = 60;
+const nativeId=value=>typeof value==='string'&&value.length>0&&value.length<=512&&value.trim()===value&&!/[\x00-\x1f\x7f]/u.test(value);
+
+// Only bounded native transcript evidence crosses to the portable question projection.
+// Identity, provenance and a recorded reply link are distinct from assistant prose.
+function normalizeNativeMessage(message) {
+  const meta=message.__openclaw;
+  if(!nativeId(meta?.id)||!Number.isSafeInteger(meta?.seq)||meta.seq<=0)return undefined;
+  const native={id:meta.id,sequence:meta.seq};
+  if(['importedFrom','cliSessionId','externalId'].some(field=>typeof meta[field]==='string'&&meta[field].trim()))native.imported=true;
+  const provenance=message.provenance;
+  if(provenance?.kind!=null)native.provenance=['external_user','internal_system','inter_session'].includes(provenance.kind)?provenance.kind:'other';
+  else if(provenance!=null&&(typeof provenance!=='object'||Array.isArray(provenance)))native.provenance='other';
+  if(nativeId(meta.replyToId))native.replyToId=meta.replyToId;
+  if(nativeId(meta.runId))native.runId=meta.runId;
+  if(native.provenance==='internal_system'&&provenance.sourceTool==='main_session_restart_recovery')native.restartRecovery=true;
+  // Codex commentary and a question's own completed turn never imply a later answer.
+  // Retire reminders only from explicit native terminal markers; incomplete metadata stays pending.
+  if(!native.imported&&message.role==='assistant'&&!message.openclawAsyncDelivery&&meta.runTerminal===true&&native.provenance!=='inter_session') {
+    const stop=typeof message.stopReason==='string'?message.stopReason.toLowerCase():'';
+    const channel=typeof message.channel==='string'?message.channel.toLowerCase():'';
+    const failed=message.openclawAbort?.aborted===true||message.isError===true||typeof message.errorMessage==='string'&&message.errorMessage.trim()||
+      ['aborted','cancelled','canceled','timeout','timed_out','error','failed'].includes(stop);
+    const completed=['stop','end_turn'].includes(stop)||channel==='final_answer';
+    native.terminal=!completed||failed||channel==='commentary'||stop==='tooluse'||array(message.content).some(block=>['toolCall','tool_use','function_call'].includes(block?.type))?'settled':'successful';
+  }
+  return native;
+}
 
 function validate(operation, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ReadError('INVALID', 'Invalid view request.');
-  const operations = { overview: ['query','offset','agentId','activeOnly'], history: ['key','agentId','sessionId','offset'],
+  const operations = { overview: ['query','offset','agentId','activeOnly'], history: ['key','agentId','sessionId','offset','foreground'],
     work: ['key','agentId','sessionId'], automations: ['offset'], reconnect: [], original: [] };
   const fields = typeof operation === 'string' && Object.hasOwn(operations,operation) ? operations[operation] : undefined;
   if (!fields || Object.keys(input).some(key => !fields.includes(key))) throw new ReadError('INVALID', 'Unsupported view request.');
   for (const [key, value] of Object.entries(input)) {
     if (value === undefined) continue;
-    if (key === 'activeOnly') { if (typeof value !== 'boolean') throw new ReadError('INVALID', 'Invalid activity filter.'); }
+    if (key === 'activeOnly' || key === 'foreground') { if (typeof value !== 'boolean') throw new ReadError('INVALID', 'Invalid view option.'); }
     else if (key === 'offset') { if (!Number.isInteger(value) || value < 0 || value > 10000000) throw new ReadError('INVALID', 'Invalid page offset.'); }
     else if (typeof value !== 'string' || value.length > (key === 'query' ? 512 : 1024) || (key !== 'query' && !value.trim())) {
       throw new ReadError('INVALID', 'Invalid session selection.');
@@ -49,19 +76,21 @@ function normalizeAsyncQuestion(message) {
     questions.push({title:question.title,...(question.options?{options:[...question.options]}:{})});
   }
   const meta=message.__openclaw;
-  const stable=bounded(meta?.id,512)&&Number.isSafeInteger(meta?.seq)&&meta.seq>0&&
+  const stable=nativeId(meta?.id)&&Number.isSafeInteger(meta?.seq)&&meta.seq>0&&
     !['importedFrom','cliSessionId','externalId'].some(field=>typeof meta[field]==='string'&&meta[field].trim());
   return {id:raw.itemId,...(stable?{sourceMessageId:meta.id}:{}),questions};
 }
 
 function normalizeMessage(message) {
   const blocks = [], texts = [];
+  const correlation=value=>typeof value==='string'&&value.length>0&&value.length<=512&&value.trim()===value&&!/[\x00-\x1f\x7f]/u.test(value)?value:undefined;
   if (typeof message.content === 'string') texts.push(message.content);
   for (const block of array(message.content)) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text);
     else if (['thinking','reasoning'].includes(block.type)) blocks.push({ type:'thinking', text:text(block.thinking || block.text,30000) });
     else if (['toolCall','tool_use','function_call'].includes(block.type)) blocks.push({ type:'tool', name:text(block.name,200),
+      ...(correlation(block.id)?{toolCallId:block.id}:{}),
       text:text(typeof block.arguments === 'string' ? block.arguments : JSON.stringify(block.arguments ?? block.input ?? {}),30000) });
     else if (['tool_result','toolResult'].includes(block.type)) blocks.push({ type:'tool', name:text(block.name || 'Tool result',200),
       text:text(typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? block.output ?? ''),30000) });
@@ -70,17 +99,26 @@ function normalizeMessage(message) {
   }
   if (!texts.length && typeof message.text === 'string') texts.push(message.text);
   const asyncQuestion=normalizeAsyncQuestion(message);
+  const native=normalizeNativeMessage(message);
   if(message.role==='assistant'&&message.openclawAsyncDelivery!==undefined&&!asyncQuestion)blocks.push({type:'file',name:'Question unavailable',text:'OpenClaw supplied an unsupported question format. Open the original interface to review it.'});
   const role = text(message.role || 'system',80);
   const content = text(texts.join('\n\n'),60000);
   const stamp = typeof message.timestamp === 'string' || Number.isFinite(message.timestamp) ? message.timestamp : undefined;
+  // Correlate native dispatch acknowledgements without inventing child session identities.
+  const receipt=role==='toolResult'?{
+    ...(correlation(message.toolCallId)?{toolCallId:message.toolCallId}:{}),
+    ...(correlation(message.toolName)&&message.toolName.length<=200?{toolName:message.toolName}:{}),
+    ...(typeof message.isError==='boolean'?{isError:message.isError}:{}),
+  }:{};
   // A transcript entry may project into several display rows. Include content identity as well as its entry ID.
   const signature = [role,content,blocks,stamp];
   if (asyncQuestion) signature.push(asyncQuestion);
+  if(Object.keys(receipt).length)signature.push(receipt);
   const hash = crypto.createHash('sha256').update(JSON.stringify(signature)).digest('hex').slice(0,16);
   const id = text(message.__openclaw?.id || message.id,512) || 'row';
   if (message.truncated) blocks.push({ type:'file', text:'OpenClaw returned a truncated message. Open the original interface for the full content.' });
-  return { id:id+':'+hash, role, text:content, blocks, timestamp:stamp, ...(asyncQuestion?{asyncQuestion}:{}) };
+  return { id:id+':'+hash, role, text:content, blocks, timestamp:stamp, ...receipt,
+    ...(message.truncated?{truncated:true}:{}), ...(native?{native}:{}), ...(asyncQuestion?{asyncQuestion}:{}) };
 }
 
 class GatewayService {
@@ -136,8 +174,11 @@ class GatewayService {
     const p = validate('history',input), offset=p.offset || 0, generation = this.generation;
     const observedAt=Date.now();
     // Tail reads cannot send sessionId without a messageId anchor. Verify the returned incarnation instead.
-    const result = await this.read('chat.history',{sessionKey:p.key,...(p.agentId?{agentId:p.agentId}:{}),
-      offset,limit:100,maxBytes:400000,maxChars:60000,toolResultMaxChars:30000},2500);
+    const params={sessionKey:p.key,...(p.agentId?{agentId:p.agentId}:{}),
+      offset,limit:100,maxBytes:400000,maxChars:60000,toolResultMaxChars:30000};
+    const pending=this.read('chat.history',params,2500);
+    if(p.foreground)this.transport.prioritize?.('chat.history',params);
+    const result=await pending;
     this.assertCurrent(generation);
     if ((p.sessionId && p.sessionId !== result.sessionId) || result.windowReset) {
       throw new ReadError('SESSION_CHANGED','This session changed or its retained history is no longer available. Select it again from the refreshed list.');

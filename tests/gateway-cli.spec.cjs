@@ -40,6 +40,65 @@ test('concurrency is bounded, close rejects waiting reads and kills only owned c
   assert.ok(children.every(c => c.killed));
 });
 
+function queuedTransport() {
+ const started=[];let active=0,maxActive=0;
+ const cli=new CliTransport({home:'/fixture',target,execute(_node,args,_options,done){
+  const method=args.includes('gateway')?args[3]:args[1];
+  const call={method,finish(error=null,result={ok:true}){assert.equal(call.finished,undefined);call.finished=true;active--;done(error,JSON.stringify(result));}};
+  started.push(call);active++;maxActive=Math.max(maxActive,active);
+  return {kill(){queueMicrotask(()=>call.finish({killed:true}));},stdin:{on(){},end(input){call.params=JSON.parse(input);}}};
+ }});
+ return {cli,started,maxActive:()=>maxActive};
+}
+
+test('explicit writes bypass queued refreshes in FIFO order without preempting either active worker',async()=>{
+ const f=queuedTransport(),pending=[f.cli.request('agents.list'),f.cli.request('sessions.list'),f.cli.request('cron.list'),
+  f.cli.write('chat.send',{idempotencyKey:'first'}),f.cli.write('chat.send',{idempotencyKey:'second'})];
+ assert.deepEqual(f.started.map(call=>call.method),['agents.list','sessions.list']);
+ f.started[0].finish();assert.equal(f.started[2].params.idempotencyKey,'first');
+ f.started[1].finish();assert.equal(f.started[3].params.idempotencyKey,'second');
+ f.started[2].finish();assert.equal(f.started[4].method,'cron.list');
+ f.started[3].finish();f.started[4].finish();await Promise.all(pending);
+ assert.equal(f.maxActive(),2);f.cli.close();
+});
+
+test('promotion selects the exact queued read and keeps existing foreground order',async()=>{
+ const f=queuedTransport(),one={key:'agent:main:first',agentId:'main'},two={key:'agent:main:second',agentId:'main'};
+ const pending=[f.cli.request('agents.list'),f.cli.request('sessions.list'),f.cli.request('sessions.describe',one),
+  f.cli.request('sessions.describe',two),f.cli.write('chat.abort',{runId:'fixture-run'})];
+ assert.equal(f.cli.prioritize('sessions.describe',{...two}),true);
+ assert.equal(f.cli.prioritize('sessions.describe',{...two}),false,'already foreground stays in place');
+ assert.equal(f.cli.prioritize('chat.history',two),false,'another method is not promoted');
+ assert.equal(f.cli.prioritize('agents.list',{}),false,'an active read is not duplicated or interrupted');
+ f.started[0].finish();assert.equal(f.started[2].method,'chat.abort');
+ f.started[1].finish();assert.equal(f.started[3].method,'sessions.describe');
+ assert.deepEqual(f.cli.queue.map(job=>job.params),[one]);
+ f.started[2].finish();assert.equal(f.started[4].method,'sessions.describe');
+ f.started[3].finish();f.started[4].finish();await Promise.all(pending);
+ assert.equal(f.maxActive(),2);f.cli.close();
+});
+
+test('foreground scheduling preserves queue admission and closing behavior',async()=>{
+ const f=queuedTransport();
+ const pending=Array.from({length:23},(_,offset)=>f.cli.request('sessions.list',{offset}).catch(error=>error.code));
+ assert.equal(f.cli.queue.length,21);
+ assert.equal(f.cli.prioritize('sessions.list',{offset:22}),true);
+ await assert.rejects(f.cli.write('chat.send',{idempotencyKey:'overflow'}),{code:'BUSY'});
+ f.cli.close();assert.deepEqual(await Promise.all(pending),Array(23).fill('CLOSED'));
+ assert.equal(f.started.length,2);assert.equal(f.cli.prioritize('sessions.list',{offset:22}),false);
+});
+
+test('promotion targets the newest coalesced read when invalidation left an identical obsolete request queued',async()=>{
+ const f=queuedTransport(),params={sessionKey:'agent:main:fixture',limit:100};
+ const pending=[f.cli.request('agents.list'),f.cli.request('sessions.list'),f.cli.request('chat.history',params),f.cli.request('chat.history',{...params})];
+ const obsolete=f.cli.queue[0],current=f.cli.queue[1];
+ assert.equal(f.cli.prioritize('chat.history',{...params}),true);
+ assert.equal(f.cli.queue[0],current);assert.equal(f.cli.queue[1],obsolete);
+ assert.equal(f.cli.prioritize('chat.history',{...params}),false,'an already-promoted current read must not promote its obsolete duplicate');
+ f.started[0].finish();f.started[1].finish();f.started[2].finish();f.started[3].finish();
+ await Promise.all(pending);assert.equal(f.maxActive(),2);f.cli.close();
+});
+
 test('writes use a separate fixed lane and retain agent execution attribution', async () => {
  const seen=[];const old=process.env.OPENCLAW_SHELL;process.env.OPENCLAW_SHELL='exec';
  try {
@@ -93,14 +152,14 @@ test('text-only prompts and configuration deltas never appear in process argumen
   const call={node,args,options};seen.push(call);
   return {kill(){},stdin:{on(){},end(input){call.input=input;queueMicrotask(()=>done(null,'{"ok":true}'));}}};
  }});
- const requests=[['chat.send',{sessionKey:'agent:main:main',message:'PRIVATE_PROMPT_FIXTURE',idempotencyKey:'text-only'}],
+ const requests=[['chat.send',{sessionKey:'agent:main:main',message:'PRIVATE_PROMPT_FIXTURE',idempotencyKey:'text-only',replyToId:'PRIVATE_REPLY_TARGET_FIXTURE'}],
   ['config.patch',{baseHash:'fixture-hash',raw:'{"ui":{"name":"PRIVATE_CONFIG_FIXTURE"}}',response:'summary'}]];
  for(const [method,params]of requests)await cli.write(method,params);
  assert.equal(seen.length,2);
  for(const [i,call]of seen.entries()){
   assert.match(call.args[0],/composer-rpc\.cjs$/);
   assert.deepEqual(call.args.slice(1),[requests[i][0],target.url]);
-  assert.doesNotMatch(JSON.stringify({args:call.args,env:call.options.env}),/PRIVATE_PROMPT_FIXTURE|PRIVATE_CONFIG_FIXTURE/);
+  assert.doesNotMatch(JSON.stringify({args:call.args,env:call.options.env}),/PRIVATE_PROMPT_FIXTURE|PRIVATE_CONFIG_FIXTURE|PRIVATE_REPLY_TARGET_FIXTURE/);
   assert.deepEqual(JSON.parse(call.input),requests[i][1]);
  }
  cli.close();
@@ -108,6 +167,8 @@ test('text-only prompts and configuration deltas never appear in process argumen
 
 test('private-input helper exposes only fixed fields and keeps admin scope off composer changes',()=>{
  assert.deepEqual(validatePrivateRequest('chat.send',{message:'fixture'}),['operator.read','operator.write']);
+ assert.deepEqual(validatePrivateRequest('chat.send',{message:'fixture',replyToId:'native-question-source'}),['operator.read','operator.write']);
+ for(const replyToId of [null,'',' padded','x'.repeat(513),'line\nbreak',123,{}])assert.throws(()=>validatePrivateRequest('chat.send',{message:'fixture',replyToId}));
  assert.deepEqual(validatePrivateRequest('sessions.patch',{key:'fixture',model:'fixture/model'}),['operator.read','operator.write']);
  assert.deepEqual(validatePrivateRequest('config.patch',{baseHash:'fixture',raw:'{}',response:'summary',replacePaths:[]}),['operator.admin']);
  for(const [method,params]of [['config.set',{}],['config.patch',{file:'/fixture/other'}],['sessions.patch',{scopes:['operator.admin']}],['chat.send',{url:'ws://elsewhere'}]])

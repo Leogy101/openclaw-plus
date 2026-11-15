@@ -4,7 +4,7 @@ const { createRequire } = require('node:module');
 const { pathToFileURL } = require('node:url');
 const MAX_BYTES = 18 * 1024 * 1024;
 const FIELDS = new Map([
-  ['chat.send',['sessionKey','agentId','sessionId','message','idempotencyKey','expectedLeafEntryId','attachments']],
+  ['chat.send',['sessionKey','agentId','sessionId','message','idempotencyKey','expectedLeafEntryId','attachments','replyToId']],
   ['sessions.patch',['key','agentId','expectedSessionId','expectedLifecycleRevision','model','thinkingLevel','permissionMode','expectedPermissionMode']],
   ['config.patch',['baseHash','raw','response','replacePaths']],
   ['tts.speak',['text']],
@@ -12,6 +12,7 @@ const FIELDS = new Map([
 function validateRequest(method, params) {
   const fields=FIELDS.get(method);
   if (!fields || !params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).some(key => !fields.includes(key))) throw new Error('Invalid private request fields');
+  if (method==='chat.send' && params.replyToId!==undefined && (typeof params.replyToId!=='string'||!params.replyToId.trim()||params.replyToId.trim()!==params.replyToId||params.replyToId.length>512||/[\x00-\x1f\x7f]/.test(params.replyToId))) throw new Error('Invalid question reply target');
   if (method==='tts.speak' && (typeof params.text!=='string'||!params.text.trim()||params.text.length>4000)) throw new Error('Invalid speech text');
   if (method==='sessions.patch' && (Object.hasOwn(params,'permissionMode')||Object.hasOwn(params,'expectedPermissionMode'))) {
     const modes=[null,'read-only','guarded','workspace','full'];

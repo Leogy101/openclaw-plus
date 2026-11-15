@@ -221,6 +221,18 @@ function createWindow() {
     },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('context-menu', (_event, params) => {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()
+      || params.frame !== window.webContents.mainFrame || params.frame?.url !== ENTRY) return;
+    const edit = (role, flag) => ({ role, enabled: params.editFlags[flag] });
+    const items = params.isEditable ? [
+      edit('undo', 'canUndo'), edit('redo', 'canRedo'), { type: 'separator' },
+      edit('cut', 'canCut'), edit('copy', 'canCopy'), edit('paste', 'canPaste'),
+      { type: 'separator' }, edit('selectAll', 'canSelectAll'),
+    ] : params.selectionText && params.editFlags.canCopy ? [{ role: 'copy' }] : [];
+    // Native roles preserve the focused control, its selection and normal input events.
+    if (items.length) Menu.buildFromTemplate(items).popup({ window, frame: params.frame });
+  });
   window.webContents.on('will-navigate', (event, url) => { if (url !== ENTRY) event.preventDefault(); });
   window.webContents.on('will-frame-navigate', (event) => {
     if (event.url !== ENTRY) event.preventDefault();
@@ -265,6 +277,8 @@ else {
       ['/vendor/xterm.css', ['vendor/xterm.css', 'text/css; charset=utf-8']],
       ['/shared/activity-model.mjs', ['../shared/activity-model.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/run-status.mjs', ['../shared/run-status.mjs', 'text/javascript; charset=utf-8']],
+      ['/shared/helper-tasks.mjs', ['../shared/helper-tasks.mjs', 'text/javascript; charset=utf-8']],
+      ['/shared/async-questions.mjs', ['../shared/async-questions.mjs', 'text/javascript; charset=utf-8']],
     ]);
     protocol.handle('openclaw-plus', request => {
       const url = new URL(request.url), asset = assets.get(url.pathname);

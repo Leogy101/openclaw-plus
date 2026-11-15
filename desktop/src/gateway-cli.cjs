@@ -57,11 +57,23 @@ class CliTransport {
     this.home = home;
     this.target = target || localTarget(home);
     this.node = node; this.cli = cli; this.approvalHelper = approvalHelper; this.composerHelper = composerHelper; this.modelHelper = modelHelper; this.execute = execute;
-    this.active = 0; this.queue = []; this.children = new Set(); this.closed = false;
+    this.active = 0; this.queue = []; this.children = new Set(); this.closed = false; this.nextOrder = 0;
     try { this.version = JSON.parse(fs.readFileSync(path.join(path.dirname(cli), 'package.json'), 'utf8')).version; } catch { this.version = undefined; }
   }
   request(method, params = {}) { return this.enqueue(method,params,false); }
   write(method, params = {}) { return this.enqueue(method,params,true); }
+  prioritize(method, params = {}) {
+    const key=JSON.stringify([method,params]);
+    // A cache invalidation can leave an obsolete identical read queued. The
+    // current coalesced request is the newest issuance for this exact key.
+    let index=-1;
+    for(let i=0;i<this.queue.length;i++)if(this.queue[i].key===key&&(index<0||this.queue[i].order>this.queue[index].order))index=i;
+    if(index<0||this.queue[index].foreground)return false;
+    const [job]=this.queue.splice(index,1);job.foreground=true;
+    const next=this.queue.findIndex(item=>!item.foreground);
+    this.queue.splice(next<0?this.queue.length:next,0,job);
+    this.drain();return true;
+  }
   modelRead(operation) {
     if (!['capabilities','catalog'].includes(operation)) return Promise.reject(new ReadError('DENIED','This model operation is not available.'));
     // Fixtures must explicitly replace this narrow reader; never reach a real gateway by accident.
@@ -77,7 +89,11 @@ class CliTransport {
     }
     if (this.closed) return Promise.reject(new ReadError('CLOSED', 'The connection is closed.'));
     if (this.queue.length > 20) return Promise.reject(new ReadError('BUSY', 'A refresh is already in progress.'));
-    return new Promise((resolve, reject) => { this.queue.push({ method, params, write, stdin, modelOperation, resolve, reject }); this.drain(); });
+    return new Promise((resolve, reject) => {
+      const job={method,params,write,stdin,modelOperation,resolve,reject,foreground:write,order:this.nextOrder++,key:write?undefined:JSON.stringify([method,params])};
+      const next=write?this.queue.findIndex(item=>!item.foreground):-1;
+      this.queue.splice(next<0?this.queue.length:next,0,job);this.drain();
+    });
   }
   drain() {
     while (!this.closed && this.active < 2 && this.queue.length) {

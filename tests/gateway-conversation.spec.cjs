@@ -60,6 +60,25 @@ test('definitive preflight and gateway rejections do not exhaust send admission'
   }
 });
 
+test('send and stop promote every required fresh preflight while keeping leaf and run validation',async()=>{
+  const f=fixture(),promoted=[];
+  f.base.transport.prioritize=(method,params)=>promoted.push({method,params});
+  await f.actions.handle('send',send);
+  assert.deepEqual(promoted.map(call=>call.method),['sessions.describe','chat.history','sessions.describe']);
+  assert.deepEqual(promoted[1].params,{sessionKey:selected.key,agentId:selected.agentId,limit:1,maxBytes:32768,toolResultMaxChars:1});
+  assert.equal(f.calls.find(call=>call.kind==='write').params.expectedLeafEntryId,'leaf-1');
+  assert.ok(f.calls.filter(call=>call.kind==='read').every(call=>call.ttl===0));
+  promoted.length=0;
+  await f.actions.handle('abort',{...selected,runId:'run-1'});
+  assert.deepEqual(promoted,[{method:'sessions.describe',params:{key:selected.key,agentId:selected.agentId}}]);
+  promoted.length=0;
+  await f.actions.handle('plan',selected);assert.deepEqual(promoted,[],'background progress retains normal priority');
+  const replaced=fixture({read:()=>({session:{...selected,sessionId:'replacement'}})});
+  replaced.base.transport.prioritize=()=>true;
+  await assert.rejects(replaced.actions.handle('send',{...send,expectedLeafEntryId:'fixture-leaf'}),{code:'SESSION_CHANGED'});
+  assert.equal(replaced.calls.some(call=>call.kind==='write'),false);
+});
+
 function attached(fixtureOptions) {
   const value = fixture(fixtureOptions), store = new AttachmentStore();
   store.items.set('file-1', { id:'file-1',context:JSON.stringify(selected),name:'fixture.txt',mimeType:'text/plain',sizeBytes:5,content:Buffer.from('hello').toString('base64') });
@@ -193,6 +212,33 @@ test('unknown send delivery preserves same payload and request ID through an exp
   const writes = calls.filter(x => x.kind === 'write');
   assert.deepEqual(writes[0].params, writes[1].params);
   assert.equal(calls.filter(x => x.method === 'chat.history').length, 1);
+});
+
+test('question replies retain their source target across an uncertain retry and reject target substitution', async () => {
+  let attempts=0;
+  const {actions,calls}=fixture({write:(_method,params)=>{
+    if(++attempts===1)throw new ReadError('TIMEOUT','Fixture timeout.');
+    return {runId:params.idempotencyKey,status:'in_flight'};
+  }});
+  const request={...send,replyToId:'native-question-source'};
+  await assert.rejects(actions.handle('send',request),{code:'UNCERTAIN'});
+  for(const replacement of ['another-question',undefined])await assert.rejects(actions.handle('send',{...request,replyToId:replacement}),{code:'INVALID'});
+  await actions.handle('send',request);
+  const writes=calls.filter(item=>item.kind==='write');
+  assert.equal(writes.length,2);assert.deepEqual(writes[0].params,writes[1].params);
+  assert.equal(writes[0].params.replyToId,'native-question-source');
+  assert.equal(writes[0].params.sessionId,selected.sessionId);
+  assert.equal(writes[0].params.agentId,selected.agentId);
+  await actions.handle('send',request);assert.equal(calls.filter(item=>item.kind==='write').length,2);
+});
+
+test('malformed reply targets and replaced sessions cannot issue a question answer', async () => {
+  const {actions,calls}=fixture();
+  for(const replyToId of [null,'',' ',' padded','x'.repeat(513),'line\nbreak',123,{}])await assert.rejects(actions.handle('send',{...send,replyToId}),{code:'INVALID'});
+  assert.equal(calls.length,0);
+  const changed=fixture({read:()=>({session:{...selected,sessionId:'replacement'}})});
+  await assert.rejects(changed.actions.handle('send',{...send,replyToId:'native-question-source'}),{code:'SESSION_CHANGED'});
+  assert.equal(changed.calls.some(item=>item.kind==='write'),false);
 });
 
 test('concurrent duplicate sends share one write and malformed acknowledgment stays uncertain', async () => {

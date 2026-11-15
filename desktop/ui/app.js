@@ -1,6 +1,8 @@
-import { linkedText, reportText, formatAsyncReply } from './content.mjs';
+import { linkedText, reportText, formatAsyncReply, groupTranscriptMessages } from './content.mjs';
 import { viewAtTime, mergeTimeline } from '../shared/activity-model.mjs';
 import { viewRunStatus } from '../shared/run-status.mjs';
+import { helperTasksFromMessages } from '../shared/helper-tasks.mjs';
+import { projectAsyncQuestions } from '../shared/async-questions.mjs';
 import { createTerminalView } from './terminal-view.mjs';
 import { createReadAloud } from './read-aloud.mjs';
 import { createVoiceController } from './voice-view.mjs';
@@ -27,6 +29,7 @@ const viewWidth = () => $('app').clientWidth;
 const state = {
   view:'Conversations', connection:{status:'connecting',label:'Local OpenClaw'}, agents:[], sessions:[],
   page:{offset:0,limit:50,total:0,hasMore:false}, overviewReady:false, overviewLoading:false, overviewError:'', overviewStale:false, query:'', agentId:'',
+  questionHistory:null, questionLoading:false, questionError:'', questionReadAt:0, questionProjection:{pending:[],statuses:[]},
   selected:null, history:null, historyLoading:false, historyError:'', historyExtended:false, historyStale:false, work:null, workLoading:false, workError:'',
   workContext:null, scope:'conversation', panel:viewWidth() >= 1280, panelTab:'work', processId:null,
   runningSessions:[], runningUpdatedAt:null, runningError:'', automations:null, automationLoading:false, automationError:'',
@@ -35,7 +38,7 @@ const state = {
   plan:null, planLoading:false, planError:'', approvals:[], approvalsLoading:false, approvalsLoaded:false, approvalsError:'', approvalLimits:[],
   settings:{loaded:false,loading:false,saving:false,baseHash:null,raw:'',sourceRaw:'',dirty:false,error:'',uncertain:false,limits:[]}
 };
-const requests = {overview:0, history:0, work:0, automations:0, running:0, plan:0, approvals:0, settings:0};
+const requests = {overview:0, history:0, questions:0, work:0, automations:0, running:0, plan:0, approvals:0, settings:0};
 const drafts=new Map();
 const sends=new Map();
 const composerRecords=new Map();
@@ -43,6 +46,7 @@ const asyncReplyDrafts=new Map();
 const approvalMutations=new Map();
 const planDisclosure=new Map();
 const activityRecords=new Map();
+const helperRecords=new Map();
 let activityRoster=null;
 let activityFreshnessTimer;
 const pendingRegions = new Map();
@@ -126,6 +130,11 @@ function replaceRegion(id, html, options={}) {
   if(id==='messages') {
     const template=document.createElement('template');template.innerHTML=html;
     for(const key of opens)template.content.querySelector(`details[data-detail="${CSS.escape(key)}"]`)?.setAttribute('open','');
+    // Loading older history can extend a tool group at its beginning. Keep an expanded group open.
+    const expandedTools=new Set([...el.querySelectorAll('.tool-batch[open] [data-message-id]')].map(node=>node.dataset.messageId));
+    for(const batch of template.content.querySelectorAll('.tool-batch')){
+      if([...batch.querySelectorAll('[data-message-id]')].some(node=>expandedTools.has(node.dataset.messageId)))batch.open=true;
+    }
     const existing=new Map([...el.querySelectorAll(':scope > [data-message-id]')].map(node=>[node.dataset.messageId,node]));
     for(const node of [...template.content.children].filter(node=>node.matches('[data-message-id]'))) {
       const previous=existing.get(node.dataset.messageId);
@@ -146,7 +155,7 @@ function sessionButton(item, cls='session-item', label=null, child=false) {
 }
 function failure(title, message, retry) { return `<div class="error-note"><strong>${esc(title)}</strong>${esc(message)}${retry ? btn(retry,'Try again') : ''}</div>`; }
 function limitsHTML(limits=[]) { return limits.filter(Boolean).map(item=>`<p class="limit-note">${linkedText(typeof item === 'string' ? item : item.message || item.reason || 'Some records are not available through this connection.')}</p>`).join(''); }
-function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();renderPermissionDialog();renderVoiceStatus(); }
+function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();syncAsyncReplyForms();renderPermissionDialog();renderVoiceStatus(); }
 function renderConnection() {
   renderActivityIndicators();renderActivityCurrent();renderRunStatus();scheduleActivityFreshness();
   const label=state.connection.label || 'Local OpenClaw';
@@ -173,6 +182,11 @@ function heading() {
   const selected=state.selected;
   const title=state.view==='Conversations' ? selected?.title || 'Your conversations' : state.view;
   const origin=state.stack.at(-1);
+  if(state.view==='Conversations'){
+    const connection=state.connection.label||'Local OpenClaw',agent=selected?nameFor(selected.agentId):'Personal workspace';
+    replaceRegion('page-heading',`<div class="heading-inline">${origin?btn('back',icon('back')+` Back to ${esc(nameFor(origin.selected.agentId))}`,'back-inline'):''}<div class="breadcrumb"><span class="breadcrumb-connection" title="${esc(connection)}">${esc(connection)}</span><span aria-hidden="true">/</span><span class="breadcrumb-agent-name" title="${esc(agent)}">${esc(agent)}</span></div><span class="heading-divider" aria-hidden="true">·</span><h1 id="page-title" tabindex="-1" title="${esc(title)}">${linkedText(title)}</h1>${selected?`<span id="activity-header">${activityHeaderHTML()}</span>`:''}</div>`);
+    return;
+  }
   replaceRegion('page-heading',`<div class="breadcrumb">${origin?btn('back',icon('back')+` Back to ${esc(nameFor(origin.selected.agentId))}`,'back-inline'):''}<span>${esc(state.connection.label || 'Local OpenClaw')}</span><span>/</span><span class="breadcrumb-agent"><span class="breadcrumb-agent-name">${esc(state.view==='Conversations'&&selected ? nameFor(selected.agentId) : 'Personal workspace')}</span>${state.view==='Conversations'&&selected?`<span id="activity-header">${activityHeaderHTML()}</span>`:''}</span></div><h1 id="page-title" tabindex="-1">${linkedText(title)}</h1>`);
 }
 function mainShell() {
@@ -189,51 +203,98 @@ function mainShell() {
   }
   $('main-region').dataset.mode=mode;
   pendingRegions.clear();
-  if(mode==='conversation') $('main-region').innerHTML='<section class="main" aria-label="Conversation"><div class="transcript" id="transcript" tabindex="0" aria-label="Conversation history"><div class="chat-inner" id="messages"></div></div><div class="composer-wrap"><div id="plan-region"></div><div id="run-status" aria-label="Current response status" aria-live="off"></div><div class="composer"><label class="sr-only" for="composer-input">Message this agent in the selected conversation</label><textarea id="composer-input" rows="2" placeholder="Message your agent…" aria-describedby="composer-hint"></textarea><div id="composer-attachments" class="composer-attachments"></div><div id="composer-controls" class="composer-controls"></div><div id="voice-status"></div><div id="composer-options-error"></div></div><div id="composer-status" role="status"></div><p class="composer-foot" id="composer-hint">Enter to send · Shift + Enter for a new line</p></div></section>';
+  if(mode==='conversation') $('main-region').innerHTML='<section class="main" aria-label="Conversation"><div class="transcript" id="transcript" tabindex="0" aria-label="Conversation history"><div class="chat-inner" id="messages"></div></div><div class="composer-wrap"><div id="plan-region"></div><div id="run-status" aria-label="Current response status" aria-live="off"></div><div id="pending-question-region" aria-label="Questions awaiting your answer"></div><div class="composer"><label class="sr-only" for="composer-input">Message this agent in the selected conversation</label><textarea id="composer-input" rows="2" placeholder="Message your agent…" aria-describedby="composer-hint"></textarea><div id="composer-attachments" class="composer-attachments"></div><div id="composer-controls" class="composer-controls"></div><div id="voice-status"></div><div id="composer-options-error"></div></div><div id="composer-status" role="status"></div><p class="composer-foot" id="composer-hint">Enter to send · Shift + Enter for a new line</p></div></section>';
   else $('main-region').innerHTML='<section class="full-page" id="page-content"></section>';
 }
-// Async delivery questions remain transcript content; preparing a reply only edits the local message draft.
+// Async answers use the same exact-session send path without consuming the separate composer draft.
+const asyncReplyKey=item=>JSON.stringify([identity(state.selected),item.id,JSON.stringify(item.questions)]);
 function asyncReplyRecord(message) {
   const item=message.asyncQuestion;if(!item||!Array.isArray(item.questions)||!item.questions.length)return null;
-  const context=identity(state.selected),signature=JSON.stringify(item.questions),key=JSON.stringify([context,item.id||item.sourceMessageId||message.id,signature]);
+  const context=identity(state.selected),signature=JSON.stringify(item.questions),key=asyncReplyKey(item);
   let record=asyncReplyDrafts.get(key);
-  if(!record||record.signature!==signature){record={key,context,signature,questions:item.questions,choices:[],other:[],domId:crypto.randomUUID(),domIds:new Map()};asyncReplyDrafts.set(key,record);}
-  while(asyncReplyDrafts.size>100){const inactive=[...asyncReplyDrafts].find(([id,entry])=>id!==key&&entry.context!==context)||[...asyncReplyDrafts].find(([id])=>id!==key);if(!inactive)break;asyncReplyDrafts.delete(inactive[0]);}
+  if(!record||record.signature!==signature){record={key,context,signature,itemId:item.id,questions:item.questions,choices:[],other:[],domId:crypto.randomUUID()};asyncReplyDrafts.set(key,record);}
+  record.sourceMessageId=item.sourceMessageId;
+  while(asyncReplyDrafts.size>100){const evictable=([id,entry])=>id!==key&&!['sending','uncertain'].includes(entry.request?.status),inactive=[...asyncReplyDrafts].find(entry=>evictable(entry)&&entry[1].context!==context)||[...asyncReplyDrafts].find(evictable);if(!inactive)break;asyncReplyDrafts.delete(inactive[0]);}
   return record;
+}
+function resetAsyncQuestions() {++requests.questions;state.questionHistory=null;state.questionLoading=false;state.questionError='';state.questionReadAt=0;state.questionProjection={pending:[],statuses:[]};}
+function rememberQuestionHistory(data,messages) {
+  const pending=new Set(state.questionProjection.pending.map(item=>item.id));
+  const retained=(state.questionHistory?.messages||[]).filter(message=>pending.has(message.asyncQuestion?.id)).slice(-100);
+  state.questionHistory={...data,retainedMessages:retained,messages:[...new Map([...retained,...messages].map(message=>[message.id,message])).values()]};
+}
+function projectQuestions() {
+  const messages=[...new Map([...(state.questionHistory?.retainedMessages||[]),...(state.history?.messages||[]),...(state.questionHistory?.messages||[])].map(message=>[message.id,message])).values()];
+  state.questionProjection=projectAsyncQuestions(messages);
+  const byId=new Map(messages.map(message=>[message.id,message]));
+  for(const item of state.questionProjection.statuses){const message=byId.get(item.messageId);if(!message?.asyncQuestion)continue;const record=asyncReplyRecord(message);if(['answered','archived'].includes(item.state))record.observedState=item.state;}
+  for(const record of asyncReplyDrafts.values())if(record.context===identity(state.selected)&&record.request?.status==='uncertain'&&state.questionProjection.statuses.some(item=>item.id===record.itemId&&item.state==='answered'))record.request.status='observed-answer';
+}
+function pendingAsyncQuestion(record) {return !record.observedState&&state.questionProjection.pending.some(item=>item.id===record.itemId&&JSON.stringify(item.questions)===record.signature);}
+function asyncQuestionSummary(message) {
+  const item=message.asyncQuestion;if(!item)return '';
+  const record=asyncReplyDrafts.get(asyncReplyKey(item)),request=record?.request;
+  const observed=record?.observedState||state.questionProjection.statuses.find(row=>row.id===item.id)?.state;
+  const pending=observed==='pending'&&request?.status!=='accepted';
+  const label=observed==='answered'?'Answer recorded':request?.status==='accepted'?'Answer sent':observed==='archived'?'Earlier question':pending?'Awaiting your answer':'Question in history';
+  return `<section class="async-question-summary" data-async-summary="${esc(item.id)}"><strong>${esc(item.questions.map(question=>question.title).join(' · '))}</strong><span>${label}${request?.status==='observed-answer'?' · Earlier send outcome unconfirmed.':''}</span>${pending?btn('jump-async-question','Jump to question','text-btn',`data-async-id="${esc(item.id)}" data-focus="question-${esc(message.id)}"`):''}</section>`;
+}
+function renderAsyncQuestionDock() {
+  const region=$('pending-question-region');if(!region)return;
+  const items=state.questionProjection.pending.filter(item=>{const record=asyncReplyDrafts.get(asyncReplyKey(item));return !record?.observedState&&record?.request?.status!=='accepted';});
+  const signature=JSON.stringify([identity(state.selected),items,state.questionError]);
+  if(region.dataset.signature!==signature){
+    const hadFocus=region.contains(document.activeElement);
+    replaceRegion('pending-question-region',`${state.questionError?failure('Questions could not be refreshed',state.questionError,'refresh-questions'):''}${items.map(item=>asyncQuestionHTML({id:item.messageId,asyncQuestion:item})).join('')}`);
+    if(!pendingRegions.has('pending-question-region'))region.dataset.signature=signature;
+    if(hadFocus&&!region.contains(document.activeElement))$('composer-input')?.focus({preventScroll:true});
+  }
+  syncAsyncReplyForms();
+}
+function jumpToAsyncQuestion(id) {
+  const node=[...document.querySelectorAll('#pending-question-region .async-question-card')].find(card=>asyncReplyDrafts.get(card.dataset.asyncKey)?.itemId===id);
+  if(!node)return;node.scrollIntoView({block:'nearest',behavior:motionPreference.matches?'instant':'smooth'});node.querySelector('input:not(:disabled),textarea:not(:disabled),button:not(:disabled)')?.focus({preventScroll:true});
 }
 function asyncQuestionHTML(message) {
   const record=asyncReplyRecord(message);if(!record)return '';
-  const sourceId=String(message.id||message.asyncQuestion.sourceMessageId||'question');
-  if(!record.domIds.has(sourceId))record.domIds.set(sourceId,crypto.randomUUID());
-  const domId=record.domIds.get(sourceId);
+  const domId=record.domId;
   return `<section class="async-question-card" data-async-key="${esc(record.key)}"><h3>Question from ${esc(nameFor(state.selected?.agentId))}</h3>${record.questions.map((question,index)=>{
     const options=Array.isArray(question.options)?question.options:[],prefix=`async-${domId}-${index}`;
     return `<fieldset data-question-index="${index}"><legend>${esc(question.title)}</legend>${options.map((option,choice)=>`<label class="async-question-option"><input id="${prefix}-${choice}" type="radio" name="${prefix}" value="${choice}" data-async-choice data-question-index="${index}"><span>${esc(option)}</span></label>`).join('')}${options.length?`<label class="async-question-option"><input id="${prefix}-other" type="radio" name="${prefix}" value="other" data-async-choice data-question-index="${index}"><span>Other</span></label>`:''}<label class="async-answer-label" for="${prefix}-text">${options.length?'Other answer':'Your answer'}</label><textarea id="${prefix}-text" data-async-other data-question-index="${index}" rows="2" maxlength="4096" placeholder="Write your answer…"></textarea></fieldset>`;
-  }).join('')}<div class="async-question-actions">${btn('prepare-async-reply','Prepare reply','button',`data-async-key="${esc(record.key)}" data-focus="prepare-${domId}"`)}<span>Prepare a reply, then send it from the message box.</span></div></section>`;
+  }).join('')}<div class="async-question-actions">${btn('send-async-reply','Send answer','button',`data-async-key="${esc(record.key)}" data-focus="answer-${domId}"`)}<span class="async-reply-status" role="status"></span></div></section>`;
 }
 function syncAsyncReplyForms() {
-  for(const card of document.querySelectorAll('#messages .async-question-card')){
+  for(const card of document.querySelectorAll('#pending-question-region .async-question-card')){
     const record=asyncReplyDrafts.get(card.dataset.asyncKey);if(!record||record.context!==identity(state.selected))continue;
     for(const input of card.querySelectorAll('[data-async-choice]')){const checked=record.choices[Number(input.dataset.questionIndex)]===input.value;if(input.checked!==checked)input.checked=checked;}
     for(const input of card.querySelectorAll('[data-async-other]')){const value=record.other[Number(input.dataset.questionIndex)]||'';if(input.value!==value)input.value=value;}
+    const request=record.request,status=request?.status,locked=['sending','uncertain','accepted'].includes(status),pending=sends.get(record.context),composer=composerRecord();
+    for(const input of card.querySelectorAll('input,textarea'))input.disabled=locked;
+    const button=card.querySelector('[data-action="send-async-reply"]');
+    button.textContent=status==='sending'?'Sending answer…':status==='accepted'?'Answer sent':status==='uncertain'?'Retry answer':'Send answer';
+    button.disabled=!online()||!state.history||state.historyLoading||state.questionLoading||Boolean(state.questionError)||!pendingAsyncQuestion(record)||['sending','accepted'].includes(status)||composer.saving||composer.picking||composer.uncertain||pending!==request&&['sending','uncertain'].includes(pending?.status);
+    button.setAttribute('aria-busy',String(status==='sending'));
+    card.querySelector('.async-reply-status').textContent=status==='accepted'?'Accepted by OpenClaw.':status==='sending'?'Sending to this conversation…':status==='uncertain'?`Delivery unconfirmed. ${request.error} Check the conversation before retrying this same answer.`:status==='rejected'?`Answer was not sent. ${request.error}`:record.error||(!online()?'Disconnected. Your answer stays here.':'Sends directly to this conversation.');
   }
 }
 function updateAsyncReplyInput(input) {
   const card=input.closest('.async-question-card'),record=card&&asyncReplyDrafts.get(card.dataset.asyncKey);if(!record||record.context!==identity(state.selected))return;
-  const index=Number(input.dataset.questionIndex);if(!Number.isInteger(index)||!record.questions[index])return;
+  const index=Number(input.dataset.questionIndex);if(!Number.isInteger(index)||!record.questions[index]||['sending','uncertain','accepted'].includes(record.request?.status))return;
   if(input.matches('[data-async-choice]'))record.choices[index]=input.value;
   else{record.other[index]=input.value;record.choices[index]='other';}
-  syncAsyncReplyForms();
+  record.error='';syncAsyncReplyForms();
 }
-function prepareAsyncReply(key) {
-  const record=asyncReplyDrafts.get(key);if(!record||record.context!==identity(state.selected)){toast('Open the original conversation before preparing this reply.');return;}
+async function sendAsyncReply(key) {
+  const record=asyncReplyDrafts.get(key);if(!record||!state.selected||record.context!==identity(state.selected)||!online())return;
+  const pending=sends.get(record.context),composer=composerRecord();
+  if(!pendingAsyncQuestion(record)||state.questionLoading||state.questionError||['sending','accepted'].includes(record.request?.status)||pending!==record.request&&['sending','uncertain'].includes(pending?.status)||composer.saving||composer.picking||composer.uncertain||!state.history||state.historyLoading)return;
   try{
-    const answers=record.questions.map((question,index)=>record.choices[index]==='other'||!question.options?.length?record.other[index]||'':question.options?.[Number(record.choices[index])]||'');
-    const reply=formatAsyncReply(record.questions,answers),draft=draftFor();
-    draft.text=draft.text?draft.text+'\n\n'+reply:reply;draft.revision++;
-    if($('composer-input'))$('composer-input').value=draft.text;renderComposer();$('composer-input')?.focus({preventScroll:true});
-    toast('Reply added to your draft. Review it and send when ready.');
-  }catch(error){toast(errorText(error));}
+    if(record.request?.status!=='uncertain'){
+      const answers=record.questions.map((question,index)=>record.choices[index]==='other'||!question.options?.length?record.other[index]||'':question.options?.[Number(record.choices[index])]||'');
+      record.request={selected:{...state.selected},message:formatAsyncReply(record.questions,answers),attachmentIds:[],requestId:crypto.randomUUID(),expectedLeafEntryId:(state.questionHistory||state.history).leafEntryId,...(record.sourceMessageId?{replyToId:record.sourceMessageId}:{}),status:'sending',asyncReplyKey:key};
+    }
+    record.error='';sends.set(record.context,record.request);await submitMessage(record.request);
+  }catch(error){record.error=errorText(error);syncAsyncReplyForms();}
 }
 function reportTextFor(message) {return [message.text,...(message.blocks || []).filter(block=>['text','markdown'].includes(block.type)&&block.text!==message.text).map(block=>block.text)].filter(Boolean).join('\n\n');}
 const readAloudKey = id => JSON.stringify([identity(state.selected),String(id)]);
@@ -267,21 +328,32 @@ function messageHTML(message,index) {
   const author=isUser?'You':role==='assistant'?nameFor(state.selected?.agentId):role==='tool'?'Tool output':role.charAt(0).toUpperCase()+role.slice(1);
   const blocks=(Array.isArray(message.blocks)?message.blocks:[]).map((block,i)=>{
     const type=block.type || 'unknown';
-    if(['tool','tool_use','tool_call','tool_result','toolResult','toolCall','reasoning','thinking'].includes(type)) return `<details class="tool-group message-block" data-detail="${esc(message.id || index)}-${i}"><summary class="tool-summary">${icon('terminal')}<span class="grow">${esc(block.name || (type==='reasoning'||type==='thinking'?'Provided reasoning':'Tool activity'))}</span>${icon('down')}</summary><div class="tool-output">${linkedText(block.text || 'No readable output was supplied.')}</div></details>`;
+    if(['tool','tool_use','tool_call','tool_result','toolResult','toolCall','reasoning','thinking'].includes(type)) return `<details class="tool-group message-block" data-detail="${esc(message.id || index)}-${i}"><summary class="tool-summary" data-focus="tool-${esc(message.id || index)}-${i}">${icon('terminal')}<span class="grow">${esc(block.name || (type==='reasoning'||type==='thinking'?'Provided reasoning':'Tool activity'))}</span>${icon('down')}</summary><div class="tool-output">${linkedText(block.text || 'No readable output was supplied.')}</div></details>`;
     if(['text','markdown'].includes(type)) return block.text && block.text!==message.text ? `<div class="message-text message-block">${role==='assistant'?reportText(block.text):linkedText(block.text)}</div>` : '';
     return `<div class="media-placeholder message-block"><strong>${linkedText(block.name || type)}</strong>${linkedText(block.text || 'This item is preserved as a reference. Open the original interface to inspect its media or file content.')}</div>`;
   }).join('');
   const id=String(message.id || `${role}-${index}`);
   const report=reportTextFor(message);
-  const question=role==='assistant'?asyncQuestionHTML(message):'';
+  const question=role==='assistant'?asyncQuestionSummary(message):'';
   const footer=role==='assistant'&&report.trim()?`<footer class="message-actions">${btn('copy-report',icon('copy')+' Copy','text-btn copy-report',`data-copy-text="${esc(report)}" data-focus="copy-${esc(id)}" aria-label="Copy report" title="Copy report text"`)}${readAloudButton(id)}</footer>`:'';
-  return `<article class="message ${isUser?'user':role==='system'?'message-system':''}" data-message-id="${esc(id)}" data-message-role="${esc(role)}"><div class="message-header">${!isUser&&role==='assistant'?avatar(state.selected?.agentId):''}<span class="message-role">${esc(author)}</span>${message.timestamp?`<time>${esc(stamp(message.timestamp))}</time>`:''}</div>${message.text?(toolMessage?`<details class="tool-group" data-detail="message-${esc(id)}"><summary class="tool-summary">${icon('terminal')}<span class="grow">Tool output</span>${icon('down')}</summary><div class="tool-output">${linkedText(message.text)}</div></details>`:`<div class="message-text">${role==='assistant'?reportText(message.text):linkedText(message.text)}</div>`):''}${blocks}${question}${!message.text&&!blocks&&!question?'<p class="small muted">No readable content was supplied.</p>':''}${footer}</article>`;
+  return `<article class="message ${isUser?'user':role==='system'?'message-system':''}" data-message-id="${esc(id)}" data-message-role="${esc(role)}"><div class="message-header">${!isUser&&role==='assistant'?avatar(state.selected?.agentId):''}<span class="message-role">${esc(author)}</span>${message.timestamp?`<time>${esc(stamp(message.timestamp))}</time>`:''}</div>${message.text?(toolMessage?`<details class="tool-group" data-detail="message-${esc(id)}"><summary class="tool-summary" data-focus="tool-message-${esc(id)}">${icon('terminal')}<span class="grow">Tool output</span>${icon('down')}</summary><div class="tool-output">${linkedText(message.text)}</div></details>`:`<div class="message-text">${role==='assistant'?reportText(message.text):linkedText(message.text)}</div>`):''}${blocks}${question}${!message.text&&!blocks&&!question?'<p class="small muted">No readable content was supplied.</p>':''}${footer}</article>`;
+}
+function transcriptHTML(messages) {
+  return groupTranscriptMessages(messages).map(group=>{
+    if(group.kind==='message')return messageHTML(group.message,group.index);
+    const onlyReasoning=group.entries.every(({message})=>message.role==='assistant'&&message.blocks.every(block=>['thinking','reasoning'].includes(block.type)));
+    return `<details class="tool-batch" data-detail="${esc(group.id)}" data-message-id="${esc(group.id)}" data-message-role="tool-activity"><summary class="tool-batch-summary" data-focus="${esc(group.id)}">${icon('terminal')}<span class="grow">${onlyReasoning?'Reasoning details':'Tool activity'}</span><span class="tool-batch-count">${group.entries.length} ${group.entries.length===1?'entry':'entries'}</span>${icon('down')}</summary><div class="tool-batch-body">${group.entries.map(({message,index})=>messageHTML(message,index)).join('')}</div></details>`;
+  }).join('');
 }
 function transcriptSnapshot() {
   const el=$('transcript'); if(!el) return null;
-  const candidates=[...el.querySelectorAll('[data-message-id]')];
+  const candidates=[...el.querySelectorAll('[data-message-id]')].filter(node=>!node.matches('.tool-batch[open]')&&node.getClientRects().length);
   const first=candidates.find(item=>item.getBoundingClientRect().bottom>el.getBoundingClientRect().top);
-  return {scroll:el.scrollTop,nearBottom:transcriptScrollPause?.el!==el&&(transcriptMotion?.el===el||el.scrollHeight-el.scrollTop-el.clientHeight<70),anchor:first?.dataset.messageId,anchorTop:first?first.getBoundingClientRect().top-el.getBoundingClientRect().top:0};
+  return {scroll:el.scrollTop,nearBottom:transcriptScrollPause?.el!==el&&(transcriptMotion?.el===el||el.scrollHeight-el.scrollTop-el.clientHeight<70),anchor:first?.dataset.messageId,anchorMember:first?.matches('.tool-batch')?first.querySelector('[data-message-id]')?.dataset.messageId:null,anchorTop:first?first.getBoundingClientRect().top-el.getBoundingClientRect().top:0};
+}
+function transcriptAnchor(el,snapshot) {
+  const nodes=[...el.querySelectorAll('[data-message-id]')];
+  return nodes.find(node=>node.dataset.messageId===snapshot.anchor)||nodes.find(node=>node.dataset.messageId===snapshot.anchorMember)?.closest('.tool-batch');
 }
 function renderHistory({initial=false, older=false, follow=false}={}) {
   if(state.view!=='Conversations') return;
@@ -299,7 +371,7 @@ function renderHistory({initial=false, older=false, follow=false}={}) {
       if(state.historyStale)html+='<div class="error-note">Earlier history is preserved while you read. '+btn('refresh-history','Refresh latest messages','text-btn')+' to resume current snapshots.</div>';
       if(state.history.hasMore) html+=`<div class="history-tools">${btn('older-history',state.historyLoading?'Loading earlier messages…':'Load earlier messages','button',state.historyLoading?'disabled':'')}</div>`;
       if(!state.history.messages.length) html+='<div class="empty"><h2>No readable messages</h2><p>This session has no returned message history. It may be empty or outside the current access scope.</p></div>';
-      html+=state.history.messages.map(messageHTML).join('');
+      html+=transcriptHTML(state.history.messages);
       if(state.history.inFlight?.text) html+=`<article class="message" data-message-id="live:${esc(state.history.inFlight.runId||'response')}" data-message-role="assistant"><div class="live-running"><i class="dot"></i>${online()?'Active response':'Last observed active response'}</div><div class="message-text">${reportText(state.history.inFlight.text)}</div></article>`;
       else if(state.history.hasActiveRun) html+=`<div class="live-running"><i class="dot"></i>${online()?'An active run is reported for this session.':'This session had an active run at the last observation.'}</div>`;
       html+='<div class="history-end">Media and file previews remain available in original OpenClaw</div>';
@@ -311,7 +383,7 @@ function renderHistory({initial=false, older=false, follow=false}={}) {
   const el=$('transcript');
   if(initial && el) followTranscript(el,{immediate:true});
   else if(snapshot&&el) {
-    const anchor=snapshot.anchor ? [...el.querySelectorAll('[data-message-id]')].find(item=>item.dataset.messageId===snapshot.anchor) : null;
+    const anchor=snapshot.anchor ? transcriptAnchor(el,snapshot) : null;
     if(!transcriptMotion) {
       if(anchor) el.scrollTop+=anchor.getBoundingClientRect().top-el.getBoundingClientRect().top-snapshot.anchorTop;
       else el.scrollTop=snapshot.scroll;
@@ -320,6 +392,7 @@ function renderHistory({initial=false, older=false, follow=false}={}) {
     else cancelTranscriptMotion();
   }
   softenNewMessages(previous,{initial,older});
+  revealHelperDispatch();
 }
 function activeSessionLabel(session) {const label=session?.hasActiveRun===true?'Running':session?.hasActiveSubagentRun===true?'Delegating':'No active run reported';return online()?label:'Stale · '+label;}
 function workRow(session, statusText, child=true) {
@@ -330,6 +403,46 @@ function processKey(process) { return JSON.stringify([process.id,process.instanc
 function processRow(process) {
   const status=knownState(process.status);
   return btn('process',icon('terminal')+`<span class="grow"><span class="work-title">${esc(process.title || process.id || 'Process')}</span><span class="work-state ${online()?'':'stale'}">${esc(online()?status:`Stale · ${status}`)}</span></span>`,'process-link',`data-process="${esc(processKey(process))}" data-focus="process-${esc(processKey(process))}"`);
+}
+function helperContextValid(context) {
+  return ['key','agentId','sessionId'].every(field=>typeof context?.[field]==='string'&&context[field].trim().length>0);
+}
+function helperHistoryMatches(context,history) {
+  return helperContextValid(context)&&history?.key===context.key&&history?.sessionId===context.sessionId;
+}
+function rememberHelperTasks(context,history) {
+  const key=identity(context);helperRecords.delete(key);
+  if(!helperHistoryMatches(context,history))return;
+  helperRecords.set(key,helperTasksFromMessages(history.messages));
+  while(helperRecords.size>20)helperRecords.delete(helperRecords.keys().next().value);
+}
+function helperTasksHTML(tasks) {
+  if(!tasks.length||!helperContextValid(state.workContext))return '';
+  return '<div class="work-section-title">Helper tasks</div><p class="helper-task-note">These helpers have no openable session in the supported OpenClaw interface. View dispatch opens their recorded tool activity.</p>'+tasks.map(task=>btn('helper-dispatch',`${icon('agents')}<span class="grow"><span class="work-title">${esc(task.taskName)}</span><span class="work-state">Dispatch recorded · ${esc(stamp(task.recordedAt))}</span><span class="work-ident">Session and live status unavailable</span><span class="helper-task-action">View dispatch record →</span></span>`,'work-link helper-task',`data-helper-id="${esc(task.id)}" data-helper-context="${esc(identity(state.workContext))}" data-focus="helper-${esc(task.id)}"`)).join('');
+}
+function viewHelperDispatch(contextKey,id) {
+  if(contextKey!==identity(state.workContext)||!helperContextValid(state.workContext))return;
+  const task=helperRecords.get(contextKey)?.find(item=>item.id===id);if(!task)return;
+  const target={contextKey,callMessageId:task.callMessageId,receiptMessageId:task.receiptMessageId};
+  if(contextKey!==identity(state.selected)){selectSession({...state.workContext},{child:true,dispatchTarget:target});return;}
+  state.dispatchTarget=target;
+  if(state.view!=='Conversations')openView('Conversations');else revealHelperDispatch();
+}
+function revealHelperDispatch() {
+  const target=state.dispatchTarget;if(!target||target.contextKey!==identity(state.selected)||state.view!=='Conversations'||!helperHistoryMatches(state.selected,state.history))return;
+  const messages=[...document.querySelectorAll('#messages article[data-message-id]')];
+  const node=messages.find(item=>item.dataset.messageId===target.receiptMessageId)||messages.find(item=>item.dataset.messageId===target.callMessageId);
+  if(!node){if(!state.historyLoading){state.dispatchTarget=null;toast('This dispatch is outside the loaded history. Load earlier messages to inspect it.');}return;}
+  state.dispatchTarget=null;cancelTranscriptMotion();
+  for(let parent=node.parentElement;parent&&parent!==$('messages');parent=parent.parentElement)if(parent.matches('details'))parent.open=true;
+  for(const detail of node.querySelectorAll('details'))detail.open=true;
+  if(state.panel&&viewWidth()<1280)toggleWork(false);
+  requestAnimationFrame(()=>{
+    if(target.contextKey!==identity(state.selected)||!node.isConnected)return;
+    const transcript=$('transcript');transcriptScrollPause={el:transcript,lowest:transcript.scrollTop};
+    node.scrollIntoView({block:'center',behavior:motionPreference.matches?'instant':'smooth'});
+    node.querySelector('summary')?.focus({preventScroll:true});
+  });
 }
 function workDetailHTML() {
   const process=state.work?.processes?.find(item=>processKey(item)===state.processId);
@@ -351,9 +464,11 @@ function renderWork({force=false}={}) {
     if(state.workLoading&&!state.work) html+='<p class="panel-note">Loading observed work…</p>';
     const subagents=state.work?.subagents || [];
     const processes=state.work?.processes || [];
+    const helpers=helperRecords.get(identity(state.workContext))||[];
     if(subagents.length) html+='<div class="work-section-title">Delegated sessions</div>'+subagents.map(item=>workRow({key:item.sessionKey,sessionId:item.sessionId,agentId:item.agentId,title:item.title,parentKey:item.parentKey},online()?knownState(item.status):'Stale · '+knownState(item.status))).join('');
+    html+=helperTasksHTML(helpers);
     if(processes.length) html+='<div class="work-section-title">Scripts & processes</div><div class="stack">'+processes.map(processRow).join('')+'</div>';
-    if(state.work&&!subagents.length&&!processes.length) html+='<p class="panel-note">No child sessions or processes were returned for this conversation. This is not an OS-wide work inventory.</p>';
+    if(state.work&&!subagents.length&&!processes.length&&!helpers.length) html+='<p class="panel-note">No child sessions or processes were returned for this conversation. This is not an OS-wide work inventory.</p>';
     if(!state.workContext) html+='<p class="panel-note">Choose a conversation to inspect its delegates and processes.</p>';
     if(state.scope==='all') {
       const linked=new Set(subagents.map(item=>identity({key:item.sessionKey,sessionId:item.sessionId,agentId:item.agentId})));
@@ -439,20 +554,37 @@ async function loadHistory({older=false,initial=false,latest=false,animate=false
   if(latest){state.historyExtended=false;state.historyStale=false;initial=!animate;}
   if(!state.selected)return;
   const selected={...state.selected}, selectionId=identity(selected), generation=++requests.history;
+  if(!older){++requests.questions;state.questionLoading=false;}
   const previous=state.history;
   const offset=older?(previous?.nextOffset ?? (previous?.offset || 0)+(previous?.pageSize || previous?.messages?.length || 0)):0;
   state.historyLoading=true;state.historyError='';renderHistory();
   try {
-    const data=await rpc('history',{key:selected.key,...(selected.agentId?{agentId:selected.agentId}:{}),...(selected.sessionId?{sessionId:selected.sessionId}:{}),offset});
+    const data=await rpc('history',{key:selected.key,...(selected.agentId?{agentId:selected.agentId}:{}),...(selected.sessionId?{sessionId:selected.sessionId}:{}),offset,...(animate?{foreground:true}:{})});
     if(generation!==requests.history||selectionId!==identity(state.selected))return;
-    if((data.key&&data.key!==selected.key)||(selected.sessionId&&data.sessionId&&data.sessionId!==selected.sessionId))throw new Error('This session identity changed after selection. No replacement conversation was opened.');
+    if(!helperHistoryMatches(selected,data)){rememberHelperTasks(selected,null);renderWork();}
+    if((data.key&&data.key!==selected.key)||(selected.sessionId&&data.sessionId&&data.sessionId!==selected.sessionId))throw Object.assign(new Error('This session identity changed after selection. No replacement conversation was opened.'),{code:'SESSION_CHANGED'});
     const messages=Array.isArray(data.messages)?data.messages:[];
     if(older&&previous){state.history={...data,pageSize:messages.length,messages:[...new Map([...messages,...previous.messages].map(item=>[item.id,item])).values()],hasActiveRun:data.hasActiveRun??previous.hasActiveRun,inFlight:data.inFlight??previous.inFlight};state.historyExtended=true;}
     else state.history={...data,pageSize:messages.length,messages};
-    retainReadAloudReport();renderHistory({initial,older,follow:animate});
+    if(!older){rememberQuestionHistory(data,messages);state.questionReadAt=Date.now();state.questionError='';}
+    projectQuestions();
+    rememberHelperTasks(state.selected,state.history);
+    retainReadAloudReport();renderHistory({initial,older,follow:animate});renderWork();
     if(state.restoreOrigin){const origin=state.restoreOrigin;state.restoreOrigin=null;requestAnimationFrame(()=>{cancelTranscriptMotion();$('transcript')?.scrollTo(0,origin.scroll);$('work-scroll')?.scrollTo(0,origin.workScroll);if(origin.focus)document.querySelector(origin.focus)?.focus({preventScroll:true});});}
-  } catch(error){if(generation===requests.history&&selectionId===identity(state.selected))state.historyError=errorText(error);}
+  } catch(error){if(generation===requests.history&&selectionId===identity(state.selected)){state.historyError=errorText(error);if(!older)state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code)){state.questionHistory=null;state.questionProjection={pending:[],statuses:[]};state.questionError=errorText(error);}if(error.code==='SESSION_CHANGED'){rememberHelperTasks(selected,null);renderWork();}}}
   finally {if(generation===requests.history&&selectionId===identity(state.selected)){state.historyLoading=false;renderHistory();}}
+}
+async function loadLatestQuestions({force=false}={}) {
+  if(!state.selected||!state.historyExtended||state.view!=='Conversations'||!online()||state.questionLoading||!force&&Date.now()-state.questionReadAt<15000)return;
+  const selected={...state.selected},key=identity(selected),generation=++requests.questions;
+  state.questionLoading=true;syncAsyncReplyForms();
+  try{
+    const data=await rpc('history',{...sessionParams(selected),offset:0});
+    if(generation!==requests.questions||key!==identity(state.selected))return;
+    if(data.key!==selected.key||selected.sessionId&&data.sessionId!==selected.sessionId)throw Object.assign(new Error('This conversation changed. Refresh its latest messages before answering.'),{code:'SESSION_CHANGED'});
+    rememberQuestionHistory(data,Array.isArray(data.messages)?data.messages:[]);state.questionError='';projectQuestions();
+  }catch(error){if(generation===requests.questions&&key===identity(state.selected)){state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code))state.questionProjection={pending:[],statuses:[]};}}
+  finally{if(generation===requests.questions&&key===identity(state.selected)){state.questionLoading=false;state.questionReadAt=Date.now();renderHistory();}}
 }
 async function loadWork() {
   if(!state.workContext)return;
@@ -462,7 +594,7 @@ async function loadWork() {
     const data=await rpc('work',{key:context.key,...(context.agentId?{agentId:context.agentId}:{}),...(context.sessionId?{sessionId:context.sessionId}:{})});
     if(generation!==requests.work||contextId!==identity(state.workContext))return;
     state.work={...data,processes:Array.isArray(data.processes)?data.processes:[],subagents:Array.isArray(data.subagents)?data.subagents:[]};
-  } catch(error){if(generation===requests.work){state.workError=errorText(error);if(error.code==='SESSION_CHANGED')state.work=null;}}
+  } catch(error){if(generation===requests.work){state.workError=errorText(error);if(error.code==='SESSION_CHANGED'){state.work=null;rememberHelperTasks(context,null);}}}
   finally{if(generation===requests.work){state.workLoading=false;renderWork();if(state.restoreWork){const origin=state.restoreWork;state.restoreWork=null;requestAnimationFrame(()=>{$('work-scroll').scrollTo(0,origin.workScroll);if(origin.focus)document.querySelector(origin.focus)?.focus({preventScroll:true});});}}}
 }
 async function loadRunning() {
@@ -480,15 +612,16 @@ async function loadAutomations() {
   finally{if(generation===requests.automations){state.automationLoading=false;if(state.view==='Automations')renderPage();}}
 }
 function saveOrigin() {return {selected:state.selected?{...state.selected}:null,workContext:state.workContext?{...state.workContext}:null,scope:state.scope,panel:state.panel,panelTab:state.panelTab,processId:state.processId,scroll:$('transcript')?.scrollTop || 0,workScroll:$('work-scroll').scrollTop,focus:actionKey(document.activeElement)};}
-function selectSession(item,{child=false,initial=false}={}) {
+function selectSession(item,{child=false,initial=false,dispatchTarget=null}={}) {
   cancelTranscriptMotion();transcriptScrollPause=null;
   if(!item?.key){toast('This work record has no exact session key. No conversation was opened.');return;}
   stopVoice();
   readAloud?.stop();
   if(child&&state.selected&&identity(item)!==identity(state.selected))state.stack.push(saveOrigin());
   else if(!child)state.stack=[];
+  resetAsyncQuestions();
   ++requests.history;++requests.plan;state.plan=null;state.planError='';state.planLoading=false;state.planReadKey=null;state.restoreOrigin=null;state.restoreWork=null;
-  state.selected={...item};state.view='Conversations';state.history=null;state.historyExtended=false;state.historyStale=false;state.historyError='';state.historyLoading=true;state.processId=null;state.navOpen=false;
+  state.selected={...item};state.dispatchTarget=dispatchTarget;state.view='Conversations';state.history=null;state.historyExtended=false;state.historyStale=false;state.historyError='';state.historyLoading=true;state.processId=null;state.navOpen=false;
   if(!child||!state.workContext){++requests.work;state.workContext={...item};state.work=null;state.workError='';}
   pendingRegions.delete('messages');mainShell();replaceRegion('messages','',{force:true});render();
   loadHistory({initial:true});loadPlan();loadActivityForContexts();loadComposerOptions(state.selected);
@@ -497,7 +630,9 @@ function selectSession(item,{child=false,initial=false}={}) {
 }
 function back() {
   cancelTranscriptMotion();transcriptScrollPause=null;
+  state.dispatchTarget=null;
   const origin=state.stack.pop();if(!origin?.selected)return;
+  resetAsyncQuestions();
   stopVoice();
   readAloud?.stop();
   ++requests.history;++requests.work;++requests.plan;state.plan=null;state.planError='';state.planLoading=false;state.planReadKey=null;
@@ -519,7 +654,7 @@ async function reconnect() {readAloud?.stop();stopVoice();invalidatePermissionRe
 function scheduleRead(kind,fn) {clearTimeout(timers.get(kind));timers.set(kind,setTimeout(()=>{timers.delete(kind);fn();},250));}
 function refreshSelectedHistory(){if(state.historyLoading)return;if(state.historyExtended){state.historyStale=true;renderHistory();}else loadHistory();}
 function gatewayEvent(event) {
-  if(event.kind==='activity'){loadActivityForContexts();if(state.view==='Models')modelsView?.load();return;}
+  if(event.kind==='activity'){loadLatestQuestions();loadActivityForContexts();if(state.view==='Models')modelsView?.load();return;}
   if(event.kind==='connection'){setConnection(event.connection);modelsView?.invalidateConnection(event.connection);if(state.view==='Models'&&event.connection?.status==='connected')modelsView?.load({force:true});renderHistory();renderWork();renderApprovals();renderSettings();if(online()){scheduleRead('approvals',()=>loadApprovals());if(state.selected)scheduleRead('plan',loadPlan);scheduleRead('overview',()=>loadOverview());if(state.selected)scheduleRead('history',()=>loadHistory());if(state.panel)scheduleRead('work',loadWork);if(state.view==='Automations')scheduleRead('automations',loadAutomations);}return;}
   if(event.kind==='approvals'){scheduleRead('approvals',()=>loadApprovals({explicit:true}));return;}
   if(event.kind==='plan'&&state.selected&&(!event.key||event.key===state.selected.key)){scheduleRead('plan',loadPlan);return;}
@@ -541,6 +676,7 @@ function runCommand(command) {
 }
 async function handleAction(node) {
   const action=node.dataset.action;
+  if(action==='helper-dispatch'){viewHelperDispatch(node.dataset.helperContext,node.dataset.helperId);return;}
   if(action==='activity-open'){if(!state.panel)toggleWork(true);state.panelTab='work';state.processId=null;layout();renderWork();$('activity-current')?.scrollIntoView({block:'nearest'});return;}
   if(action==='refresh-activity'){loadActivity(state.workContext||state.selected,{force:true});return;}
   if(action==='more-activity'){moreActivity();return;}
@@ -559,7 +695,9 @@ async function handleAction(node) {
     readAloud?.start(key,reportTextFor(message));return;
   }
   if(action==='send'){sendMessage();return;}
-  if(action==='prepare-async-reply'){prepareAsyncReply(node.dataset.asyncKey);return;}
+  if(action==='send-async-reply'){sendAsyncReply(node.dataset.asyncKey);return;}
+  if(action==='jump-async-question'){jumpToAsyncQuestion(node.dataset.asyncId);return;}
+  if(action==='refresh-questions'){if(state.historyExtended)loadLatestQuestions({force:true});else loadHistory({latest:true});return;}
   if(action==='attach-media'){pickMedia();return;}
   if(action==='permissions'){openPermissions();return;}
   if(action==='refresh-permissions'){loadPermissionOptions(state.modal?.operation);return;}
@@ -775,7 +913,8 @@ function renderComposer() {
   const pending=send?.status==='sending',uncertain=send?.status==='uncertain',frozen=pending||uncertain;
   const runIds=Array.isArray(state.history?.activeRunIds)?state.history.activeRunIds:[];
   const busy=record.saving||record.picking;
-  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historyLoading&&!pending&&!busy&&!record.uncertain&&(uncertain||Boolean(draft.text.trim())||draft.attachments.length>0);
+  const retry=uncertain&&!send.asyncReplyKey;
+  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historyLoading&&!pending&&!busy&&!record.uncertain&&(!uncertain||retry)&&(retry||Boolean(draft.text.trim())||draft.attachments.length>0);
   const disabled=!online()||!state.selected||frozen||busy;
   const models=options?.models||[],model=models.find(item=>item.value===options?.current?.model),levels=model?.thinkingLevels||[];
   const unavailableModel=options?.current?.model&&!model;
@@ -784,34 +923,40 @@ function renderComposer() {
   const reasoningOptions=(levels.some(item=>item.id===currentLevel)?'':`<option value="" disabled selected>${esc(record.loading?'Loading…':'Reasoning unavailable')}</option>`)+levels.map(item=>`<option value="${esc(item.id)}" ${item.id===currentLevel?'selected':''}>${esc(item.label||item.id)}</option>`).join('');
   const lockReason=options?.modelSelectionLocked?'Model selection is locked by OpenClaw for this session.':'Choose this session’s model';
   replaceRegion('composer-attachments',draft.attachments.map(item=>`<span class="composer-attachment" data-attachment-id="${esc(item.id)}" title="${esc(item.name)} · ${Math.ceil(Number(item.sizeBytes||0)/1024)} KB">${icon('file')}<span>${esc(item.name)}</span>${btn('remove-attachment',icon('close'),'icon-btn',`data-attachment="${esc(item.id)}" data-focus="attachment-${esc(item.id)}" aria-label="Remove attachment ${esc(item.name)}" ${frozen||busy?'disabled':''}`)}</span>`).join(''));
-  replaceRegion('composer-controls',`<div class="composer-tools">${btn('attach-media',icon('plus'),'icon-btn composer-attach',`id="attach-media" aria-label="Attach media" title="Attach files · up to 4 files, 12 MiB total (images up to 6 MiB each)" ${disabled||draft.attachments.length>=4||!desktop?.pickAttachments?'disabled':''}`)}${btn('permissions',icon('shield'),'icon-btn composer-permissions',`id="composer-permissions" aria-label="Execution permissions" title="Review execution permissions for this conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId?'disabled':''}`)}${btn('voice-menu',icon('mic'),'icon-btn composer-voice',`id="composer-voice" aria-label="Voice options" title="Dictate or start a live voice conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId||!voiceView?'disabled':''}`)}<label class="sr-only" for="composer-model">Model</label><select id="composer-model" class="composer-select" title="${esc(lockReason)}" ${disabled||record.loading||record.uncertain||options?.modelSelectionLocked||!models.length?'disabled':''}>${modelOptions}</select><label class="sr-only" for="composer-reasoning">Reasoning level</label><select id="composer-reasoning" class="composer-select" title="Reasoning level for this session" ${disabled||record.loading||record.uncertain||!levels.length?'disabled':''}>${reasoningOptions}</select></div><div class="row composer-send">${runIds.length===1?btn('review-stop','Stop response','text-btn',`data-run="${esc(runIds[0])}" ${online()?'':'disabled'}`):''}${btn('send',icon('up')+` ${pending?'Sending…':uncertain?'Retry same message':'Send'}`,'button primary',`${canSend?'':'disabled'} id="send-message" aria-label="${uncertain?'Retry the same message request':'Send message'}"`)}</div>`);
+  replaceRegion('composer-controls',`<div class="composer-tools">${btn('attach-media',icon('plus'),'icon-btn composer-attach',`id="attach-media" aria-label="Attach media" title="Attach files · up to 4 files, 12 MiB total (images up to 6 MiB each)" ${disabled||draft.attachments.length>=4||!desktop?.pickAttachments?'disabled':''}`)}${btn('permissions',icon('shield'),'icon-btn composer-permissions',`id="composer-permissions" aria-label="Execution permissions" title="Review execution permissions for this conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId?'disabled':''}`)}${btn('voice-menu',icon('mic'),'icon-btn composer-voice',`id="composer-voice" aria-label="Voice options" title="Dictate or start a live voice conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId||!voiceView?'disabled':''}`)}<label class="sr-only" for="composer-model">Model</label><select id="composer-model" class="composer-select" title="${esc(lockReason)}" ${disabled||record.loading||record.uncertain||options?.modelSelectionLocked||!models.length?'disabled':''}>${modelOptions}</select><label class="sr-only" for="composer-reasoning">Reasoning level</label><select id="composer-reasoning" class="composer-select" title="Reasoning level for this session" ${disabled||record.loading||record.uncertain||!levels.length?'disabled':''}>${reasoningOptions}</select></div><div class="row composer-send">${runIds.length===1?btn('review-stop','Stop response','text-btn',`data-run="${esc(runIds[0])}" ${online()?'':'disabled'}`):''}${btn('send',icon('up')+` ${pending?'Sending…':retry?'Retry same message':'Send'}`,'button primary',`${canSend?'':'disabled'} id="send-message" aria-label="${retry?'Retry the same message request':'Send message'}"`)}</div>`);
   const note=record.error||((options?.modelSelectionLocked?'Model selection is locked by OpenClaw for this session. ':'' )+(options?.limitations||[]).map(item=>typeof item==='string'?item:item.message||'').filter(Boolean).join(' '));
   replaceRegion('composer-options-error',note?`<p class="composer-option-note ${record.error?'is-error':''}">${esc(note)}${record.error?btn('refresh-composer','Refresh options','text-btn',`${record.loading||busy||!online()?'disabled':''}`):''}</p>`:'');
   let message=!online()?'Disconnected. Your draft stays here until the connection returns.':'';
   if(pending)message='Sending this message to OpenClaw…';
-  if(uncertain)message=`Send outcome unconfirmed. ${send.error} Refresh the conversation to check for a response, or retry the same request. Your current draft is preserved.`;
+  if(uncertain)message=`Send outcome unconfirmed. ${send.error} ${send.asyncReplyKey?'Check the conversation, then use Retry answer on the question card if needed.':'Refresh the conversation to check for a response, or retry the same request.'} Your current draft is preserved.`;
   if(send?.status==='rejected')message=`Message was not sent. ${send.error} Your draft is preserved. Refresh the conversation if its state changed, then send again.`;
   if(send?.status==='accepted')message=send.receipt?.status==='stopped'?'Stop command handled by OpenClaw. Refreshing this conversation.':'Message accepted by OpenClaw. The response will appear when its history updates.';
   replaceRegion('composer-status',message?`<p class="composer-notice ${uncertain||send?.status==='rejected'?'is-error':''}">${esc(message)}${uncertain||send?.status==='rejected'?btn('refresh-history','Refresh conversation','text-btn'):''}</p>`:'');
-  renderVoiceStatus();
+  renderVoiceStatus();renderAsyncQuestionDock();
 }
 async function sendMessage() {
   if(!state.selected||!online())return;
   const selected={...state.selected},key=identity(selected),draft=draftFor(selected);
   let request=sends.get(key);
-  if(request?.status==='sending'||composerRecord(selected).saving||composerRecord(selected).picking||composerRecord(selected).uncertain)return;
+  if(request?.status==='sending'||request?.status==='uncertain'&&request.asyncReplyKey||composerRecord(selected).saving||composerRecord(selected).picking||composerRecord(selected).uncertain)return;
   if(request?.status!=='uncertain') {
     if((!draft.text.trim()&&!draft.attachments.length)||!state.history||state.historyLoading)return;
     request={selected,message:draft.text,attachmentIds:draft.attachments.map(item=>item.id),draftRevision:draft.revision,requestId:crypto.randomUUID(),expectedLeafEntryId:state.history.leafEntryId,status:'sending'};
     sends.set(key,request);
   }
+  await submitMessage(request);
+}
+async function submitMessage(request) {
+  const key=identity(request.selected);
   request.status='sending';request.error='';renderComposer();
   try {
-    const result=await rpc('send',{...sessionParams(request.selected),message:request.message,requestId:request.requestId,...(request.attachmentIds.length?{attachmentIds:request.attachmentIds}:{}),...(request.expectedLeafEntryId!==undefined?{expectedLeafEntryId:request.expectedLeafEntryId}:{})});
+    const result=await rpc('send',{...sessionParams(request.selected),message:request.message,requestId:request.requestId,...(request.attachmentIds.length?{attachmentIds:request.attachmentIds}:{}),...(request.replyToId?{replyToId:request.replyToId}:{}),...(request.expectedLeafEntryId!==undefined?{expectedLeafEntryId:request.expectedLeafEntryId}:{})});
     request.status='accepted';request.receipt=result;request.runId=result.runId;
-    const current=draftFor(request.selected);
-    current.attachments=current.attachments.filter(item=>!request.attachmentIds.includes(item.id));
-    if(current.revision===request.draftRevision&&current.text===request.message){current.text='';current.revision++;if(identity(state.selected)===key&&$('composer-input'))$('composer-input').value='';}
+    if(!request.asyncReplyKey){
+      const current=draftFor(request.selected);
+      current.attachments=current.attachments.filter(item=>!request.attachmentIds.includes(item.id));
+      if(current.revision===request.draftRevision&&current.text===request.message){current.text='';current.revision++;if(identity(state.selected)===key&&$('composer-input'))$('composer-input').value='';}
+    }
     if(identity(state.selected)===key){loadHistory({latest:true,animate:true});loadPlan();if(state.panel)loadWork();}
     scheduleRead('overview',()=>loadOverview({poll:true}));announce(result.status==='stopped'?'Stop command handled by OpenClaw.':'Message accepted by OpenClaw.');
   }catch(error){request.status=mutationRejected(error)?'rejected':'uncertain';request.error=errorText(error);}
@@ -1172,7 +1317,7 @@ function afterTerminalLayout(saved) {
   if(!saved||saved.el!==$('transcript')||saved.key!==identity(state.selected))return;
   const {el,snapshot}=saved;
   if(snapshot.nearBottom&&!transcriptScrollPause)el.scrollTop=el.scrollHeight;
-  else{const anchor=[...el.querySelectorAll('[data-message-id]')].find(node=>node.dataset.messageId===snapshot.anchor);if(anchor)el.scrollTop+=anchor.getBoundingClientRect().top-el.getBoundingClientRect().top-snapshot.anchorTop;else el.scrollTop=snapshot.scroll;}
+  else{const anchor=transcriptAnchor(el,snapshot);if(anchor)el.scrollTop+=anchor.getBoundingClientRect().top-el.getBoundingClientRect().top-snapshot.anchorTop;else el.scrollTop=snapshot.scroll;}
 }
 function appendTerminalSelection(context,selection,snapshot) {
   const draft=draftFor(context),runs=selection.match(/`+/g)||[],fence='`'.repeat(Math.max(3,...runs.map(run=>run.length+1)));
