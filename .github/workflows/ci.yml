@@ -1,0 +1,51 @@
+name: Desktop checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Unit, security and GCB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.10.0'
+          package-manager-cache: false
+      - name: Install locked desktop dependencies without lifecycle scripts
+        run: npm ci --prefix desktop --ignore-scripts --no-audit --no-fund
+      - name: Check JavaScript syntax and prepare the UI
+        shell: bash
+        run: |
+          git ls-files '*.js' '*.cjs' '*.mjs' | while IFS= read -r file; do
+            node --check "$file"
+          done
+          npm run build:ui --prefix desktop
+          git diff --exit-code -- desktop/package.json desktop/package-lock.json
+      - name: Install the released GCB wheel with its verified hash
+        shell: bash
+        run: |
+          # System Python needs no LD_LIBRARY_PATH, which the desktop strips.
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/gcb"
+          "$RUNNER_TEMP/gcb/bin/python" -m pip install --disable-pip-version-check --no-deps --require-hashes \
+            'https://github.com/Leogy101/governed-capability-broker/releases/download/v0.3.2a1/governed_capability_broker-0.3.2a1-py3-none-any.whl#sha256=fa51a803a02ea652b854db2160bd0e60f48168c3deaae9b3e994a2c1be94fffc'
+          "$RUNNER_TEMP/gcb/bin/python" -m pip check
+          "$RUNNER_TEMP/gcb/bin/python" -c 'import importlib.metadata; assert importlib.metadata.version("governed-capability-broker") == "0.3.2a1"'
+          test -x "$RUNNER_TEMP/gcb/bin/gcb"
+          echo "OPENCLAW_PLUS_TEST_GCB=$RUNNER_TEMP/gcb/bin/gcb" >> "$GITHUB_ENV"
+      - name: Run unit, security and synthetic GCB integration tests
+        run: npm test --prefix desktop

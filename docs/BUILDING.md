@@ -42,6 +42,14 @@ Native tests require Apple Silicon macOS, an active graphical session and `/opt/
 
 Terminal tests use an in-memory echo connector, not a live shell. Voice tests use silent synthetic audio and mocked providers/permission prompts; they do not qualify physical microphones or real provider compatibility. Fixture coverage includes conversations, questions, activity, delegation, automations, approvals, permissions, terminal, voice, Models, profiling lifecycle, evidence disclosure and persistence. Native logs and captures are written into a new ignored `evidence/runs/` directory per run.
 
+### Hosted CI
+
+[Desktop checks](https://github.com/Leogy101/openclaw-plus/actions/workflows/ci.yml) runs on pull requests and pushes to `main`, using one standard Ubuntu 24.04 runner. It installs the npm lockfile without lifecycle scripts, checks JavaScript syntax, prepares the renderer and runs the complete unit/security suite with installed-GCB integration enabled. These checks are headless and platform-independent. This is plain JavaScript; there is no TypeScript typecheck.
+
+Actions are pinned to commit SHAs, Node to 26.10.0, and the independent GCB 0.3.2a1 release wheel to its published SHA-256. Ubuntu's system Python 3.12 avoids relying on `LD_LIBRARY_PATH`, which the desktop intentionally removes from GCB subprocesses. The four installed-GCB cases use fictional responses or a temporary fake Ollama HTTP server. No OpenClaw installation, provider credentials, model weights or live inference are required.
+
+CI has read-only repository permissions, does not retain checkout credentials, and uploads no profiles, screenshots or test artifacts. It does not run Electron, native GUI tests, packaging or release publication. Passing Linux CI does **not** qualify the native macOS application: the existing Apple Silicon graphical-session tests and packaged startup/recovery checks remain separate release checks. No self-hosted runner or GUI workaround is required by this workflow.
+
 GCB's own Python, host-bridge and release tests belong to its independent checkout. Follow that repository's verification instructions; a desktop test pass does not replace them. Live profiling is a separate explicitly authorized activity, never part of these fixture commands.
 
 The retained visual prototype is an optional historical baseline. From `desktop`:
