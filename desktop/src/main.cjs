@@ -17,6 +17,8 @@ const { PermissionService } = require('./gateway-permissions.cjs');
 const { VoiceService } = require('./gateway-voice.cjs');
 const { MicrophonePermission } = require('./microphone-permission.cjs');
 const { ModelManagerService } = require('./model-manager.cjs');
+const { GcbService, PROFILE_OPERATIONS } = require('./gcb-service.cjs');
+const { authorizeProfileTarget, authorizeLocalProfileTarget } = require('./gcb-native.cjs');
 const { nativeSetupUrl } = require('./model-rpc.cjs');
 const { readProjectObservation } = require('./project-observation.cjs');
 const INTERACTIVE = new Set(['plan','send','abort','approvals','resolveApproval','settings','saveSettings','composerOptions','setComposer']);
@@ -51,6 +53,9 @@ let speech;
 let permissions;
 let voice;
 let models;
+let profiles;
+let choosingProfileFile = false;
+let closingProfiles = false;
 const microphone = new MicrophonePermission({entry:ENTRY,contents:()=>window?.webContents});
 let refreshTimer;
 const attachments = new AttachmentStore();
@@ -84,7 +89,43 @@ async function localFile(value) {
   }
   throw new Error('This file is not available on this Mac. It may have moved or its volume may be disconnected.');
 }
-const publish = event => { if(event.kind==='connection')models?.invalidateConnection(); if (window && !window.isDestroyed()) window.webContents.send('gateway:event', event); };
+const publish = event => { if(event.kind==='connection'){models?.invalidateConnection();profiles?.invalidateConnection();} if (window && !window.isDestroyed()) window.webContents.send('gateway:event', event); };
+function getProfiles() {
+  if (!models) models = new ModelManagerService({gateway:()=>getGateway(),registryPath:path.join(userData,'ModelManager','registry.json')});
+  if (!profiles) profiles = new GcbService({directory:path.join(userData,'GCB'),home:app.getPath('home'),
+    nativeHelper:app.isPackaged?path.join(process.resourcesPath,'gcb-openclaw.cjs'):path.join(__dirname,'gcb-openclaw.cjs'),
+    authorizeTarget:snapshot=>authorizeProfileTarget({models,gateway:()=>getGateway()},snapshot),
+    authorizeLocal:modelRef=>authorizeLocalProfileTarget({models,gateway:()=>getGateway()},modelRef),
+    ...(!app.isPackaged && testData && path.isAbsolute(process.env.OPENCLAW_PLUS_TEST_GCB || '')
+      ? {executable:process.env.OPENCLAW_PLUS_TEST_GCB} : {})});
+  return profiles;
+}
+async function chooseProfileFile(operation, params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).length)
+    throw new ReadError('INVALID','This action accepts no file path or configuration from the page.');
+  if (choosingProfileFile) throw new ReadError('BUSY','A GCB file chooser is already open.');
+  choosingProfileFile = true;
+  try {
+    const importing = operation === 'modelsProfileImport';
+    const selected = await dialog.showOpenDialog(window, {title:importing?'Choose a reviewed GCB host snapshot':'Choose your installed GCB executable',
+      buttonLabel:importing?'Import snapshot':'Connect GCB',properties:['openFile'],
+      ...(importing?{filters:[{name:'GCB host snapshot',extensions:['json']}]}:{})});
+    if (selected.canceled || selected.filePaths.length !== 1) return {cancelled:true};
+    const file = selected.filePaths[0];
+    if (!importing) return getProfiles().connect(file);
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536) throw new ReadError('INVALID','Choose a regular GCB host snapshot JSON file smaller than 64 KB.');
+    const fd = fs.openSync(file,fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      const current = fs.fstatSync(fd);
+      if (current.ino !== stat.ino || current.dev !== stat.dev || current.size > 65536) throw new ReadError('INVALID','The selected snapshot changed. Select it again.');
+      let snapshot;
+      try { snapshot = JSON.parse(fs.readFileSync(fd,'utf8')); }
+      catch { throw new ReadError('INVALID','The selected file is not valid snapshot JSON.'); }
+      return await getProfiles().importSnapshot(snapshot);
+    } finally { fs.closeSync(fd); }
+  } finally { choosingProfileFile = false; }
+}
 function getGateway() {
   if (!gateway) {
     // Explicit development-only fixture seam. Packaged builds ignore these environment variables.
@@ -255,7 +296,13 @@ function createWindow() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', showWindow);
-  app.on('before-quit', () => { quitting = true; clearInterval(refreshTimer); closeVoice(); terminals?.close(); gateway?.close(); });
+  app.on('before-quit', event => {
+    if (profiles && !closingProfiles) {
+      event.preventDefault(); closingProfiles = true;
+      Promise.resolve().then(()=>profiles.close()).catch(()=>{}).finally(()=>app.quit()); return;
+    }
+    quitting = true; clearInterval(refreshTimer); closeVoice(); terminals?.close(); gateway?.close();
+  });
   app.on('activate', showWindow);
   app.whenReady().then(() => {
     nativeTheme.themeSource = preferences.theme;
@@ -267,6 +314,7 @@ else {
       ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
       ['/models.css', ['models.css', 'text/css; charset=utf-8']],
       ['/models-view.mjs', ['models-view.mjs', 'text/javascript; charset=utf-8']],
+      ['/profile-view.mjs', ['profile-view.mjs', 'text/javascript; charset=utf-8']],
       ['/content.mjs', ['content.mjs', 'text/javascript; charset=utf-8']],
       ['/terminal-view.mjs', ['terminal-view.mjs', 'text/javascript; charset=utf-8']],
       ['/read-aloud.mjs', ['read-aloud.mjs', 'text/javascript; charset=utf-8']],
@@ -378,6 +426,9 @@ else {
     ipcMain.handle('desktop:models', async (event, operation, params) => {
       if (!trustedFrame(event)) return {ok:false,error:{code:'DENIED',message:'Untrusted application frame.'}};
       try {
+        if (operation === 'modelsProfileConnect' || operation === 'modelsProfileImport')
+          return {ok:true,data:await chooseProfileFile(operation,params)};
+        if (PROFILE_OPERATIONS.includes(operation)) return {ok:true,data:await getProfiles().handle(operation,params)};
         if (!models) models = new ModelManagerService({gateway:()=>getGateway(),registryPath:path.join(userData,'ModelManager','registry.json')});
         const data = await models.handle(operation,params);
         if (operation === 'modelsOnboarding') {

@@ -241,11 +241,15 @@ async function check(name, fn) {
       await expect(page.locator('.mm-metadata').first()).toContainText('high');
     });
 
-    await check('Checks and personal routing remain unavailable with no fabricated results or execution controls', async () => {
+    await check('Checks offers separate GCB onboarding and live routing remains unavailable', async () => {
       await page.locator('[data-models-action="tab"][data-view="Checks"]').click();
-      await expect(action('unavailable-check')).toBeDisabled(); await expect(page.locator('#mm-check-reason')).toContainText('not been enabled');
+      await expect(page.locator('[data-profile-action="connect"]').first()).toBeEnabled();
+      await expect(page.locator('.mm-profiles')).toContainText('offline');
+      assert.equal(await page.locator('.mm-profile-bio').count(),0);
       await page.locator('[data-models-action="tab"][data-view="Personal routing"]').click();
-      await expect(action('unavailable-route')).toBeDisabled(); await expect(page.locator('.mm-phase')).toContainText('Preview-only');
+      await expect(page.locator('.mm-profiles')).toContainText('previews');
+      const activate=page.locator('[data-profile-action="unavailable-route"]');
+      if(await activate.count())await expect(activate).toBeDisabled();
       await page.locator('[data-models-action="tab"][data-view="Catalog"]').click();
     });
 

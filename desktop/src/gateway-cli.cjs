@@ -6,7 +6,7 @@ const { execFile } = require('node:child_process');
 // Fixed read and write lanes; the renderer never supplies a method or executable.
 const READ_METHODS = new Set(['agents.list', 'sessions.list', 'sessions.describe', 'chat.history',
   'sessions.processes.list', 'cron.list', 'cron.runs', 'progressCard.get',
-  'exec.approval.list','plugin.approval.list','openclaw.approval.list','approval.get','config.get','audit.activity.list','models.list','tts.status']);
+  'exec.approval.list','plugin.approval.list','openclaw.approval.list','approval.get','config.get','audit.activity.list','models.list','tts.status','gcb.profile.preflight']);
 const WRITE_METHODS = new Set(['chat.send','chat.abort','approval.resolve','config.patch','sessions.patch','tts.speak']);
 const APPROVAL_METHODS = new Set(['exec.approval.list','plugin.approval.list','openclaw.approval.list','approval.get','approval.resolve']);
 const DEFAULT_NODE = '/opt/homebrew/bin/node';

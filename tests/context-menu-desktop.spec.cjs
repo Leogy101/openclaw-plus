@@ -22,7 +22,18 @@ delete env.ELECTRON_RUN_AS_NODE;
   const clear = () => app.evaluate(() => { globalThis.__contextMenuFixture.menus = []; globalThis.__contextMenuFixture.contexts = []; });
   const input = page.locator('#composer-input');
   const rightClick = async (locator, force = false) => { await clear(); await locator.click({ button: 'right', force }); await app.evaluate(() => new Promise(resolve => setImmediate(resolve))); return snapshot(); };
-  const action = name => app.evaluate(({ Menu }, name) => Menu.sendActionToFirstResponder(name), name);
+  const action = async name => {
+    // Target Electron's native editing command at this fixture's WebContents.
+    // A captured popup has no OS first responder; global menu dispatch can
+    // otherwise act on a different foreground application in unattended runs.
+    await input.focus();
+    await app.evaluate(({ BrowserWindow }, name) => {
+      const contents=BrowserWindow.getAllWindows()[0].webContents;
+      if(name==='selectAll:')contents.selectAll();
+      else if(name==='undo:')contents.undo();
+      else throw new Error('Unsupported fixture editing command.');
+    },name);
+  };
   const check = async (name, fn) => { try { await fn(); checks.push({ name, pass: true }); console.log('PASS', name); } catch (error) { checks.push({ name, pass: false, error: error.message }); console.log('FAIL', name, error.message); await page.screenshot({ path: path.join(evidence, `failure-${checks.length}.png`) }).catch(() => {}); throw error; } };
   try {
     await page.getByText('Coordinator is coordinating.', { exact: true }).waitFor();
@@ -36,9 +47,10 @@ delete env.ELECTRON_RUN_AS_NODE;
       for (const [index, flag] of ['canUndo', 'canRedo', 'canCut', 'canCopy', 'canPaste', 'canSelectAll'].entries()) assert.equal(items[index].enabled, context.flags[flag]);
       assert.equal(await input.inputValue(), 'Parent draft.');
     });
-    await check('Native Select All and Undo preserve input events and exact-session drafts without clipboard access', async () => {
+    await check('Window-targeted native Select All and Undo preserve input events and exact-session drafts without clipboard access', async () => {
       await input.focus(); await input.press('End'); await input.pressSequentially('x');
       await rightClick(input); await action('selectAll:');
+      await page.waitForFunction(() => {const input=document.querySelector('#composer-input');return input.selectionStart===0&&input.selectionEnd===input.value.length;});
       assert.deepEqual(await input.evaluate(node => [node.selectionStart, node.selectionEnd]), [0, 'Parent draft.x'.length]);
       await action('undo:'); await page.waitForFunction(() => document.querySelector('#composer-input').value === 'Parent draft.');
       if (!await page.locator('#work-panel').isVisible()) await page.locator('#toggle-work').click();

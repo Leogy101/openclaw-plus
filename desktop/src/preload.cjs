@@ -11,7 +11,9 @@ contextBridge.exposeInMainWorld('openclawPlusDesktop', Object.freeze({
   isDesktop: true,
   initialTheme,
   async models(operation, params = {}) {
-    if (!['modelsOverview','modelsPlanRegistration','modelsRegister','modelsRefresh','modelsOnboarding'].includes(operation)) return {ok:false,error:{code:'INVALID',message:'Unsupported Models operation.'}};
+    if (!['modelsOverview','modelsPlanRegistration','modelsRegister','modelsRefresh','modelsOnboarding',
+      'modelsProfileOverview','modelsProfileConnect','modelsProfileImport','modelsProfileLocal','modelsProfileResearch','modelsProfilePlan',
+      'modelsProfileStart','modelsProfilePause','modelsProfileCancel','modelsProfilePreview','modelsProfileEvidence'].includes(operation)) return {ok:false,error:{code:'INVALID',message:'Unsupported Models operation.'}};
     return ipcRenderer.invoke('desktop:models', operation, params);
   },
   async voice(operation, params = {}) {

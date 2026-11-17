@@ -29,13 +29,16 @@ const project = path.dirname(root);
   for (const name of ['LICENSE', 'LICENSES.chromium.html']) {
     fs.copyFileSync(path.join(root, 'node_modules/electron/dist', name), path.join(notices, name));
   }
+  for (const name of ['Mantle.LICENSE.md', 'ReactiveObjC.LICENSE.md']) {
+    fs.copyFileSync(path.join(root, 'licenses', name), path.join(notices, name));
+  }
   const outputs = await packager({
     dir: stage, name: pkg.productName, platform: 'darwin', arch: 'arm64',
     electronVersion: pkg.devDependencies.electron,
     out: path.join(project, 'releases', pkg.version), overwrite: true,
     tmpdir: path.join(project, '.cache', 'packager'),
     download: { cacheRoot: path.join(project, '.cache', 'electron') },
-    asar: true, extraResource: ['approval-rpc.cjs','composer-rpc.cjs','terminal-rpc.cjs','voice-rpc.cjs','model-rpc.cjs'].map(name => path.join(root,'src',name)), prune: false, icon: path.join(root, 'assets', 'AppIcon.icns'),
+    asar: true, extraResource: ['approval-rpc.cjs','composer-rpc.cjs','terminal-rpc.cjs','voice-rpc.cjs','model-rpc.cjs','gcb-openclaw.cjs'].map(name => path.join(root,'src',name)), prune: false, icon: path.join(root, 'assets', 'AppIcon.icns'),
     appBundleId: 'app.openclawplus.desktop', appVersion: pkg.version,
     buildVersion: pkg.version, appCategoryType: 'public.app-category.productivity',
     extendInfo: { CFBundleDisplayName: pkg.productName, NSHumanReadableCopyright: 'Copyright © 2026 OpenClaw+ contributors',
