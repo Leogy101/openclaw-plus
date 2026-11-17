@@ -170,6 +170,18 @@ test('an exact current history run supplies positive evidence when the complete 
   assert.equal(calls.filter(item => item.method === 'chat.history').length, 1);
 });
 
+test('a single complete active ID remains usable when history has no sampled run details', async () => {
+  const { service } = fixture({ respond: (method, params, defaults) => {
+    if (method === 'chat.history') return { ...defaults(), inFlightRun: undefined };
+    return defaults();
+  } });
+  const snapshot = await service.read(selected);
+  assert.equal(snapshot.runStatus.state, 'active');
+  assert.equal(snapshot.runStatus.runId, 'run-1');
+  assert.equal(snapshot.runStatus.startedAt, undefined);
+  assert.deepEqual(snapshot.liveEvents, []);
+});
+
 test('explicit idle, conflicting or invalid active IDs at any selected read boundary reject current run evidence', async () => {
   for (const stage of ['before', 'history', 'after']) for (const conflict of [
     { activeRunIds: [] }, { activeRunIds: ['another-run'] }, { activeRunIds: null },

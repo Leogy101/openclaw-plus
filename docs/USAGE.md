@@ -4,7 +4,13 @@ OpenClaw+ connects to an existing OpenClaw installation. Before launching, check
 
 ## Conversations and activity
 
-Choose an existing conversation in **Conversations**, or browse one from **Agents**. Compose a message, add supported attachments and use the model or reasoning choices supplied by the gateway. Unsent drafts, attachments and question selections stay in memory while the app runs; they are not restored after quitting. Accepted conversations remain with OpenClaw.
+Choose an existing conversation in **Conversations**, or browse one from **Agents**. To start a blank chat, choose **New Conversation** or press **⌘N**, select an agent and choose **Create**. OpenClaw stores the new conversation and waits for your first message.
+
+Compose a message, add supported attachments and use the model or reasoning choices supplied by the gateway. The **Context** meter beside those pickers shows reported context usage. Hover over it for token counts and the applicable context window or last-run prompt budget. A tilde marks an approximate reading. Unsent drafts, attachments and question selections stay in memory while the app runs and are lost when it quits. OpenClaw retains accepted messages.
+
+Type `/` at the start of a draft to see OpenClaw's available commands, and keep typing to filter the list. Click a command or use the arrow keys and **Enter** or **Tab** to insert it. **Esc** closes the list, and **Send** submits the command under the conversation's existing permissions.
+
+When OpenClaw confirms an active response and the composer is empty, the primary button becomes **Stop**. Choose it to review the stop request for that response. Typing a follow-up or attaching a file brings back **Send** so you can submit it while work is active. Clearing the draft brings back Stop while the response is still active.
 
 Unanswered asynchronous questions appear above the composer. **Send answer** submits the selected or typed answers while preserving the separate draft and attachments. Confirmed answers from another OpenClaw client can clear their matching questions. An unconfirmed submission is not a delivery receipt; review the current conversation before using its explicit retry action.
 

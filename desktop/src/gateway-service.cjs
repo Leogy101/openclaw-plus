@@ -6,6 +6,7 @@ const finite = value => Number.isFinite(value) ? value : undefined;
 const array = value => Array.isArray(value) ? value : [];
 const LIMIT = 60;
 const nativeId=value=>typeof value==='string'&&value.length>0&&value.length<=512&&value.trim()===value&&!/[\x00-\x1f\x7f]/u.test(value);
+const DASHBOARD_KEY = /^agent:[a-z0-9][a-z0-9_-]{0,63}:dashboard:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 
 // Only bounded native transcript evidence crosses to the portable question projection.
 // Identity, provenance and a recorded reply link are distinct from assistant prose.
@@ -36,6 +37,7 @@ function normalizeNativeMessage(message) {
 function validate(operation, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ReadError('INVALID', 'Invalid view request.');
   const operations = { overview: ['query','offset','agentId','activeOnly'], history: ['key','agentId','sessionId','offset','foreground'],
+    slashCommandCatalog: ['key','agentId','sessionId'],
     work: ['key','agentId','sessionId'], automations: ['offset'], reconnect: [], original: [] };
   const fields = typeof operation === 'string' && Object.hasOwn(operations,operation) ? operations[operation] : undefined;
   if (!fields || Object.keys(input).some(key => !fields.includes(key))) throw new ReadError('INVALID', 'Unsupported view request.');
@@ -53,7 +55,7 @@ function validate(operation, input = {}) {
 
 function sessionRow(row) {
   return { key: text(row.key,1024), sessionId: text(row.sessionId,1024) || undefined,
-    agentId: text(row.agentId,1024), title: text(row.displayName || row.derivedTitle || row.label || row.key,512),
+    agentId: text(row.agentId,1024), title: text(row.displayName || row.derivedTitle || row.label || (DASHBOARD_KEY.test(row.key) ? 'New conversation' : row.key),512),
     updatedAt: finite(row.updatedAt), kind: text(row.kind,80), archived: row.archived === true,
     hasActiveRun: typeof row.hasActiveRun === 'boolean' ? row.hasActiveRun : undefined,
     hasActiveSubagentRun: typeof row.hasActiveSubagentRun === 'boolean' ? row.hasActiveSubagentRun : undefined,
@@ -61,6 +63,59 @@ function sessionRow(row) {
     parentKey: text(row.parentSessionKey || row.spawnedBy || row.controlOwnerSessionKey,1024) || undefined,
     summary: text(row.activitySummary?.text,1000) || undefined,
     subagentRunState: text(row.subagentRunState,80) || undefined };
+}
+
+function commandName(value) {
+  const name = typeof value === 'string' ? value.trim().replace(/^\//u,'').toLowerCase() : '';
+  return /^[a-z0-9][a-z0-9_-]{0,199}$/u.test(name) ? name : '';
+}
+
+function normalizeCommands(value) {
+  if (!Array.isArray(value?.commands)) throw new ReadError('UNAVAILABLE','OpenClaw did not return a command list.');
+  const commands = new Map();
+  const labelText = (value, limit) => text(value,limit).replace(/[\x00-\x1f\x7f]/gu,' ').trim();
+  for (const entry of value.commands.slice(0,500)) {
+    const name = commandName(entry?.name);
+    if (!name || commands.has(name) || entry.scope === 'native') continue;
+    const aliases = [...new Set(array(entry.textAliases).slice(0,20).map(commandName))].filter(alias=>alias&&alias!==name);
+    const kind = ['native','plugin','skill'].includes(entry.source) ? entry.source : undefined;
+    const label = kind === 'skill' ? labelText(entry.skillDisplayName,200) : '';
+    commands.set(name,{name,description:labelText(entry.description,300),aliases,acceptsArgs:entry.acceptsArgs===true,
+      ...(kind ? {kind} : {}), ...(label ? {label} : {})});
+  }
+  return [...commands.values()];
+}
+
+function sessionContextUsage(history, selected) {
+  const row = history.sessionInfo;
+  if (!row || typeof row !== 'object' || Array.isArray(row) || !nativeId(selected.sessionId) ||
+      history.sessionId !== selected.sessionId ||
+      (history.sessionKey !== undefined && history.sessionKey !== selected.key) ||
+      (row.sessionId !== undefined && row.sessionId !== selected.sessionId) ||
+      (row.key !== undefined && row.key !== selected.key) ||
+      (selected.agentId !== undefined && row.agentId !== undefined && row.agentId !== selected.agentId)) return;
+
+  const { totalTokens, contextTokens, modelProvider, model, contextBudgetStatus } = row;
+  if (!Number.isSafeInteger(totalTokens) || totalTokens < 0 ||
+      !Number.isSafeInteger(contextTokens) || contextTokens <= 0) return;
+
+  const hasModel = nativeId(modelProvider) && nativeId(model);
+  // The gateway's last prompt budget belongs to a specific model and window.
+  const prompt = contextBudgetStatus;
+  const matchingPrompt = hasModel && prompt?.schemaVersion === 1 && prompt.source === 'pre-prompt-estimate' &&
+    prompt.sessionId === selected.sessionId && prompt.contextTokenBudget === contextTokens &&
+    nativeId(prompt.provider) && prompt.provider.toLowerCase() === modelProvider.toLowerCase() &&
+    nativeId(prompt.model) && prompt.model.toLowerCase() === model.toLowerCase() &&
+    Number.isSafeInteger(prompt.promptBudgetBeforeReserve) && prompt.promptBudgetBeforeReserve > 0 &&
+    prompt.promptBudgetBeforeReserve <= contextTokens;
+
+  return {
+    usedTokens: totalTokens,
+    capacityTokens: matchingPrompt ? prompt.promptBudgetBeforeReserve : contextTokens,
+    budget: matchingPrompt ? 'prompt' : 'window',
+    fresh: row.totalTokensFresh === true,
+    ...(hasModel ? { modelRef: `${modelProvider}/${model}` } : {}),
+  };
 }
 
 // Supported async question metadata is separate from ordinary transcript text.
@@ -188,12 +243,34 @@ class GatewayService {
     this.assertCurrent(generation);
     return {key:p.key,sessionId:result.sessionId,messages:result.messages.map(normalizeMessage),
       runStatus:normalizeRunStatus(result,{context:{key:p.key,agentId:p.agentId,sessionId:p.sessionId||result.sessionId},observedAt}),
+      contextUsage:sessionContextUsage(result,p),
       total:finite(result.total) ?? finite(result.totalMessages) ?? result.messages.length,
       hasMore:result.hasMore===true,offset,nextOffset:finite(result.nextOffset),
       hasActiveRun:result.sessionInfo?.hasActiveRun,
       leafEntryId:typeof result.sessionInfo?.activeLeafEntryId==='string'||result.sessionInfo?.activeLeafEntryId===null?result.sessionInfo.activeLeafEntryId:undefined,
       activeRunIds:Array.isArray(result.sessionInfo?.activeRunIds)?result.sessionInfo.activeRunIds.filter(x=>typeof x==='string').slice(0,100):undefined,
       inFlight:result.inFlightRun ? {runId:text(result.inFlightRun.runId,512),text:text(result.inFlightRun.text,60000)} : undefined};
+  }
+  async slashCommandCatalog(input) {
+    const p = validate('slashCommandCatalog',input), generation = this.generation;
+    if (![p.key,p.agentId,p.sessionId].every(nativeId)) {
+      throw new ReadError('INVALID','Select an exact conversation to list its slash commands.');
+    }
+    const verifySession = async () => {
+      const {session} = await this.read('sessions.describe',{key:p.key,agentId:p.agentId},0) || {};
+      this.assertCurrent(generation);
+      if (session?.key !== p.key || session.agentId !== p.agentId || session.sessionId !== p.sessionId) {
+        throw new ReadError('SESSION_CHANGED','This conversation changed. Select it again to see its commands.');
+      }
+      return session.lifecycleRevision;
+    };
+    const revision = await verifySession();
+    const result = await this.read('commands.list',{sessionKey:p.key,agentId:p.agentId,scope:'text',includeArgs:false},0);
+    this.assertCurrent(generation);
+    if (revision !== await verifySession()) {
+      throw new ReadError('SESSION_CHANGED','This conversation changed while its commands were loading. Open the menu again.');
+    }
+    return {commands:normalizeCommands(result)};
   }
   async work(input) {
     const p = validate('work',input), limitations = [], generation = this.generation;

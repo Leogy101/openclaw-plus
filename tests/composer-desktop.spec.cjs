@@ -29,7 +29,11 @@ const persisted=()=>JSON.parse(fs.readFileSync(path.join(profile,'fixture-state.
  try {
   await app.evaluate(({ipcMain,dialog,shell,clipboard,BrowserWindow})=>{
    BrowserWindow.getAllWindows()[0].setSize(1440,1000);
-   const state=globalThis.__composerFixture={calls:[],dialogs:[],picks:[],pickerHold:false,pickerReleases:[],pickerError:false,optionsMode:'source',settingError:false,uncertainSend:false,native:[],lastOptions:null};
+   const contextByAgent={
+    main:{usedTokens:8000,capacityTokens:32000,budget:'window',fresh:true,modelRef:'fixture/model-one'},
+    builder:{usedTokens:8000,capacityTokens:16000,budget:'window',fresh:true,modelRef:'fixture/model-one'},
+   };
+   const state=globalThis.__composerFixture={calls:[],dialogs:[],picks:[],pickerHold:false,pickerReleases:[],pickerError:false,optionsMode:'source',settingError:false,uncertainSend:false,native:[],lastOptions:null,historyRunActive:null,contextByAgent};
    dialog.showOpenDialog=async(...args)=>{
     state.dialogs.push(args.at(-1));
     if(state.pickerError){state.pickerError=false;throw new Error('Fixture picker unavailable');}
@@ -49,6 +53,16 @@ const persisted=()=>JSON.parse(fs.readFileSync(path.join(profile,'fixture-state.
      if(state.optionsMode==='unavailable')result.data={...result.data,models:[],limitations:['Fixture model catalog unavailable.']};
      state.lastOptions=structuredClone(result.data);
     }
+    if(operation==='history'&&result?.ok)result.data.contextUsage=state.contextByAgent[params.agentId]??null;
+    if(['history','activity'].includes(operation)&&result?.ok&&state.historyRunActive!==null){
+     const runId='fixture-picker-run',observedAt=Date.now();
+     const context={key:params.key,agentId:params.agentId,sessionId:params.sessionId};
+     result.data.runStatus={
+      context,observedAt,freshUntil:observedAt+45000,
+      state:state.historyRunActive?'active':'idle',
+      ...(state.historyRunActive?{runId,startedAt:observedAt}:{})
+     };
+    }
     return result;
    });
    shell.openExternal=async value=>state.native.push(['external',value]);shell.showItemInFolder=value=>state.native.push(['reveal',value]);clipboard.writeText=value=>state.native.push(['copy',value]);
@@ -61,6 +75,84 @@ const persisted=()=>JSON.parse(fs.readFileSync(path.join(profile,'fixture-state.
    const options=(await main()).lastOptions;assert.ok(options.models.length>=2);assert.equal(await page.locator('#composer-model').inputValue(),options.current.model);assert.equal(await page.locator('#composer-reasoning').inputValue(),options.current.thinkingLevel);
    assert.ok((await page.locator('#composer-model option').allTextContents()).every(label=>label.trim()));assert.equal(count('sessions.patch'),0);
    assert.equal(await page.getByRole('button',{name:'Attach media',exact:true}).isEnabled(),true);
+  });
+
+  await check('Context meter updates while model and reasoning pickers stay open',async()=>{
+   const initialUsage={usedTokens:8000,capacityTokens:32000,budget:'window',fresh:true,modelRef:'fixture/model-one'};
+   const promptUsage={...initialUsage,usedTokens:20000,capacityTokens:40000,budget:'prompt'};
+   const approximateUsage={...initialUsage,usedTokens:24000,fresh:false};
+   const publishRun=(active,usage)=>app.evaluate(({BrowserWindow},{active,usage})=>{
+    const fixture=globalThis.__composerFixture;
+    fixture.historyRunActive=active;
+    fixture.contextByAgent.main=usage;
+    BrowserWindow.getAllWindows()[0].webContents.send('gateway:event',{kind:'history',key:'agent:main:main'});
+   },{active,usage});
+   const contextMeter=page.locator('#composer-context');
+   const waitContext=pattern=>page.waitForFunction(pattern=>
+    new RegExp(pattern,'i').test(document.querySelector('#composer-context')?.textContent.trim()||''),pattern.source);
+   await waitContext(/25%/);
+   assert.match(await contextMeter.getAttribute('aria-valuetext'),/8\D?000.*32\D?000/);
+   await page.evaluate(()=>{
+    // Restoring focus to a replacement select still dismisses the native popup.
+    window.__composerPickerNodes=['composer-model','composer-reasoning'].map(id=>{
+     const select=document.getElementById(id);
+     return {select,options:[...select.options],value:select.value};
+    });
+   });
+   const assertPickerOpen=async id=>{
+    const actual=await page.evaluate(id=>{
+     const stable=window.__composerPickerNodes.every(({select,options,value})=>
+      document.getElementById(select.id)===select&&select.value===value&&
+      select.options.length===options.length&&options.every((option,index)=>option===select.options[index]));
+     const active=document.getElementById(id);
+     return {stable,open:active.matches(':open'),focused:active.contains(document.activeElement)};
+    },id);
+    assert.deepEqual(actual,{stable:true,open:true,focused:true},id);
+   };
+   const dismiss=async id=>{
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(id=>!document.getElementById(id).matches(':open'),id);
+   };
+   try {
+    await page.locator('#composer-model').click();
+    await assertPickerOpen('composer-model');
+    await publishRun(true,promptUsage);
+    await page.getByRole('button',{name:'Stop response',exact:true}).waitFor();
+    await waitContext(/50%/);
+    assert.match(await contextMeter.getAttribute('aria-valuetext'),/20\D?000.*40\D?000/);
+    // The popup must also survive the next repaint of the live run timer.
+    await page.waitForFunction(()=>{
+     const elapsed=document.querySelector('[data-run-metric="elapsed"]');
+     return elapsed&&elapsed.textContent!=='0s';
+    });
+    await assertPickerOpen('composer-model');
+    await dismiss('composer-model');
+
+    await page.locator('#composer-reasoning').click();
+    await assertPickerOpen('composer-reasoning');
+    await page.locator('#composer-input').evaluate(input=>{
+     input.value='Background draft update.';
+     input.dispatchEvent(new Event('input',{bubbles:true}));
+    });
+    await page.getByRole('button',{name:'Send message',exact:true}).waitFor();
+    await assertPickerOpen('composer-reasoning');
+
+    await publishRun(false,approximateUsage);
+    await page.waitForFunction(()=>!document.querySelector('.run-status-bar.is-active'));
+    await waitContext(/[~≈]\s*75%/);
+    assert.match(await contextMeter.getAttribute('aria-valuetext'),/approximat/i);
+    await assertPickerOpen('composer-reasoning');
+    await publishRun(false,null);
+    await waitContext(/Context\s*—/);
+    await assertPickerOpen('composer-reasoning');
+    await dismiss('composer-reasoning');
+    assert.equal(count('sessions.patch'),0);
+   } finally {
+    if(await page.locator('.composer-select:open').count())await page.keyboard.press('Escape');
+    await publishRun(null,initialUsage);
+    await page.locator('#composer-input').fill('');
+    await page.evaluate(()=>{delete window.__composerPickerNodes;});
+   }
   });
 
   await check('Model and reasoning changes target the exact session and ordinary polling does not reload options',async()=>{
@@ -95,6 +187,8 @@ const persisted=()=>JSON.parse(fs.readFileSync(path.join(profile,'fixture-state.
    await waitMain(()=>globalThis.__composerFixture.pickerReleases.length===1);
    if(!await page.locator('#work-panel').isVisible())await page.locator('#toggle-work').click();
    await page.locator('#work-content [data-action="session"]').first().click();await page.getByText('Builder exact child history',{exact:true}).waitFor();await ready();
+   await page.waitForFunction(()=>document.querySelector('#composer-context')?.textContent.includes('50%'));
+   assert.match(await page.locator('#composer-context').getAttribute('aria-valuetext'),/8\D?000.*16\D?000/);
    assert.equal(await page.locator('#composer-input').inputValue(),'');await page.locator('#composer-input').fill('Builder draft is separate.');
    await app.evaluate(()=>{const s=globalThis.__composerFixture;s.pickerHold=false;s.pickerReleases.splice(0).forEach(resolve=>resolve());});
    await page.waitForTimeout(120);assert.equal(await chips().count(),0);assert.equal(await page.locator('#composer-input').inputValue(),'Builder draft is separate.');
@@ -161,7 +255,7 @@ const persisted=()=>JSON.parse(fs.readFileSync(path.join(profile,'fixture-state.
    if(await page.locator('#work-panel').isVisible())await page.locator('#close-work').click();
    for(const width of [1100,880]){
     await app.evaluate(({BrowserWindow},width)=>BrowserWindow.getAllWindows()[0].setSize(width,820),width);await page.waitForTimeout(180);
-    for(const selector of ['#attach-media','#composer-model','#composer-reasoning','#send-message']){
+    for(const selector of ['#attach-media','#composer-model','#composer-reasoning','#composer-context','#send-message']){
      const box=await page.locator(selector).boundingBox();assert.ok(box&&box.x>=0&&box.x+box.width<=width+1,`${selector} fits ${width}`);
     }
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);

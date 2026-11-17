@@ -5,6 +5,8 @@ const { pathToFileURL } = require('node:url');
 const MAX_BYTES = 18 * 1024 * 1024;
 const CHECKED_SEND = 'chat.send.checked'; // Local helper operation, never a native RPC method.
 const PREFLIGHT = Symbol('preflight');
+const AGENT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const identifier = (value,max=1024) => typeof value==='string'&&value.trim().length>0&&value.length<=max&&!/[\x00-\x1f\x7f]/u.test(value);
 function sessionError(code,message){const error=new Error(message);error.code=code;return error;}
 function assertSession(row,input,sending=false) {
@@ -16,6 +18,7 @@ function assertSession(row,input,sending=false) {
 }
 const FIELDS = new Map([
   ['chat.send',['sessionKey','agentId','sessionId','message','idempotencyKey','expectedLeafEntryId','attachments','replyToId']],
+  ['sessions.create',['key','agentId']],
   ['sessions.patch',['key','agentId','expectedSessionId','expectedLifecycleRevision','model','thinkingLevel','permissionMode','expectedPermissionMode']],
   ['config.patch',['baseHash','raw','response','replacePaths']],
   ['tts.speak',['text']],
@@ -24,11 +27,24 @@ function validateRequest(method, params) {
   const checked=method===CHECKED_SEND;
   if(checked)method='chat.send';
   const fields=FIELDS.get(method);
-  if (!fields || !params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).some(key => !fields.includes(key))) throw new Error('Invalid private request fields');
+  if (!fields || !params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).some(key => !fields.includes(key))) {
+    if (method === 'sessions.create') throw sessionError('INVALID_REQUEST', 'Invalid conversation request fields.');
+    throw new Error('Invalid private request fields');
+  }
   if(checked&&(['sessionKey','agentId','sessionId'].some(key=>!identifier(params[key]))||
       !identifier(params.idempotencyKey,128)||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(params.idempotencyKey)||
       params.expectedLeafEntryId!==null&&!identifier(params.expectedLeafEntryId)||
       typeof params.message!=='string'||Buffer.byteLength(params.message,'utf8')>16384||!params.message.trim()&&!params.attachments?.length))throw sessionError('INVALID','Invalid checked message request');
+  if (method === 'sessions.create') {
+    if (typeof params.agentId !== 'string' || !AGENT_ID.test(params.agentId)) {
+      throw sessionError('INVALID_REQUEST', 'A canonical agent ID is required.');
+    }
+    const prefix = `agent:${params.agentId}:dashboard:`;
+    if (typeof params.key !== 'string' || !params.key.startsWith(prefix) || !UUID_V4.test(params.key.slice(prefix.length))) {
+      throw sessionError('INVALID_REQUEST', 'A fresh agent-qualified conversation key is required.');
+    }
+    return ['operator.write'];
+  }
   if (method==='chat.send' && params.replyToId!==undefined && (typeof params.replyToId!=='string'||!params.replyToId.trim()||params.replyToId.trim()!==params.replyToId||params.replyToId.length>512||/[\x00-\x1f\x7f]/.test(params.replyToId))) throw new Error('Invalid question reply target');
   if (method==='tts.speak' && (typeof params.text!=='string'||!params.text.trim()||params.text.length>4000)) throw new Error('Invalid speech text');
   if (method==='sessions.patch' && (Object.hasOwn(params,'permissionMode')||Object.hasOwn(params,'expectedPermissionMode'))) {
@@ -60,9 +76,16 @@ async function executeRequest(method, expectUrl, params, loadGateway) {
     const safe=new Error('Message preflight did not complete.');
     safe.code=error?.gatewayCode??error?.code??'UNAVAILABLE';safe[PREFLIGHT]=true;throw safe;
   }
-  return callGatewayFromCli(checked?'chat.send':method,
-    {expectUrl,json:true,timeout:method==='tts.speak'?'130000':'20000'},params,
-    {scopes,sharedStateMode:'read-only',progress:false});
+  try {
+    return await callGatewayFromCli(checked?'chat.send':method,
+      {expectUrl,json:true,timeout:method==='tts.speak'?'130000':'20000'},params,
+      {scopes,sharedStateMode:'read-only',progress:false});
+  } catch (error) {
+    if (method==='sessions.create' && error?.gatewayCode==='INVALID_REQUEST' && error.message==='unknown method: sessions.create') {
+      throw sessionError('UNSUPPORTED', 'Conversation creation is unavailable.');
+    }
+    throw error;
+  }
 }
 function failurePayload(error) {
   const candidate=error?.gatewayCode??error?.code;

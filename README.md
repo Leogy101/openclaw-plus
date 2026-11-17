@@ -4,11 +4,12 @@
 
 An independent macOS desktop workspace for your existing OpenClaw installation. Keep conversations, agent activity, voice, terminal work and model profiles together while OpenClaw remains responsible for execution, authentication and permissions.
 
-**OpenClaw+ is an unofficial project, not the official OpenClaw application.** This source prepares **0.8.0-preview.1** for Apple Silicon macOS. It does not include an OpenClaw installation or model weights.
+**OpenClaw+ is an unofficial project, not the official OpenClaw application.** This source builds **0.8.0-preview.6** for Apple Silicon macOS. It does not include an OpenClaw installation or model weights.
 
 ## What you can do
 
-- Continue existing conversations, review tool activity, attach supported files and answer asynchronous questions.
+- Start or continue conversations, review tool activity, attach supported files and answer asynchronous questions.
+- Browse slash commands in the composer, see context usage and choose a model or reasoning level while the conversation refreshes.
 - Follow agent sessions, activity and existing automations; review native approval requests.
 - Read reports aloud, dictate into a draft or talk through supported, configured OpenClaw voice providers.
 - Open a terminal for a conversation and copy selected output into a message draft.
@@ -47,9 +48,9 @@ npm start
 
 The separate Electron setup downloads the pinned desktop runtime. An active macOS graphical session is required. The build-tool Node minimum does not replace OpenClaw's higher runtime requirements.
 
-To build a local application, run `npm run package` from `desktop`, then open `releases/0.8.0-preview.1/OpenClaw+-darwin-arm64/OpenClaw+.app` from the repository root in Finder. See [building and verification](docs/BUILDING.md) for the full procedure.
+To build a local application, run `npm run package` from `desktop`, then open `releases/0.8.0-preview.6/OpenClaw+-darwin-arm64/OpenClaw+.app` from the repository root in Finder. See [building and verification](docs/BUILDING.md) for the full procedure.
 
-**Distribution status:** these are source and local-build instructions, not a claim that a public download exists. If a reviewed release later provides a ZIP, verify its checksum, extract it in Finder, move the contained **OpenClaw+.app** to your Applications folder and open it. Packages are **ad-hoc signed, not Developer ID signed or notarized**; macOS may block a downloaded build. There is no installer or automatic update channel.
+The [Releases page](https://github.com/Leogy101/openclaw-plus/releases) lists available downloads. To install one, verify its ZIP checksum, extract it in Finder and move **OpenClaw+.app** to Applications. Packages use ad-hoc signing, and macOS may block downloaded builds. There is no installer or automatic update channel.
 
 ## Try Models with GCB
 

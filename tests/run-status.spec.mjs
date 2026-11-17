@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalizeRunStatus,viewRunStatus,RUN_FRESH_MS} from '../desktop/shared/run-status.mjs';
+import {normalizeRunStatus,viewRunStatus,stoppableRunId,RUN_FRESH_MS} from '../desktop/shared/run-status.mjs';
 const now=1700000100000,context={key:'agent:main:fixture',agentId:'main',sessionId:'physical-one'};
 const event=(seq,stream,data,extra={})=>({runId:'run-one',seq,stream,ts:now-1000,sessionKey:context.key,agentId:context.agentId,data,...extra});
 function history(events=[event(1,'usage',{outputTokens:2500})]){return {sessionKey:context.key,sessionId:context.sessionId,sessionInfo:{...context,lifecycleRevision:'life-one',hasActiveRun:true},inFlightRun:{runId:'run-one',startedAt:now-10000,text:'',events}};}
@@ -59,4 +59,94 @@ test('stale and disconnected responses freeze at their real last observation and
 });
 test('terminal lifecycle receipts cannot be shown as an active response despite a stale aggregate flag',()=>{
  const result=project(history([event(1,'usage',{outputTokens:10}),event(2,'lifecycle',{phase:'end'})]));assert.equal(result.state,'unknown');assert.equal(viewRunStatus(result,now).active,false);
+});
+
+test('a complete single active identity remains targetable when in-flight details are absent',()=>{
+ const h=history();delete h.inFlightRun;h.sessionInfo.activeRunIds=['exact-active'];
+ const status=project(h);assert.equal(status.runId,'exact-active');assert.equal(status.state,'active');
+ assert.equal(status.outputTokens,undefined);assert.equal(status.startedAt,undefined);
+ assert.equal(stoppableRunId({context,status:viewRunStatus(status,now),now}),'exact-active');
+ for(const ids of [undefined,['first','second']]){
+  if(ids===undefined)delete h.sessionInfo.activeRunIds;else h.sessionInfo.activeRunIds=ids;
+  assert.equal(project(h).runId,undefined);
+  assert.equal(stoppableRunId({context,status:viewRunStatus(project(h),now),now}),null);
+ }
+});
+
+const submitted=(overrides={})=>({selected:{...context},status:'accepted',acceptedAt:now,
+ receipt:{status:'started',runId:'owned-run'},...overrides});
+const observed=(state='active',overrides={})=>viewRunStatus({context:{...context},state,observedAt:now,
+ freshUntil:now+RUN_FRESH_MS,...(state==='active'?{runId:'observed-run'}:{}),...overrides},now);
+
+test('Stop targets the exact selected response while unrelated sessions and invalid identities are rejected',()=>{
+ assert.equal(stoppableRunId({context,status:observed(),now}),'observed-run');
+ for(const field of ['key','agentId','sessionId']){
+  const foreign={...context,[field]:'another'};
+  assert.equal(stoppableRunId({context,status:observed('active',{context:foreign}),now}),null);
+  assert.equal(stoppableRunId({context,submission:submitted({selected:foreign}),now}),null);
+  assert.equal(stoppableRunId({context:{...context,[field]:''},status:observed(),now}),null);
+ }
+ for(const runId of ['',null,'x'.repeat(1025),'bad\nidentity'])assert.equal(stoppableRunId({context,status:observed('active',{runId}),now}),null);
+});
+
+test('owned started and in-flight receipts bridge the gap before a newer exact observation',()=>{
+ for(const phase of ['started','in_flight']){
+  const submission=submitted({receipt:{status:phase,runId:'owned-run'}});
+  assert.equal(stoppableRunId({context,submission,now}),'owned-run');
+  assert.equal(stoppableRunId({context,status:observed('idle',{observedAt:now-1}),submission,now}),'owned-run');
+  assert.equal(stoppableRunId({context,status:observed('active',{observedAt:now-1}),submission,now}),'owned-run');
+  assert.equal(stoppableRunId({context,status:observed('active'),submission,now}),'observed-run');
+ }
+});
+
+test('equal or newer idle, unknown, terminal and stale observations supersede a prior started receipt',()=>{
+ const submission=submitted({acceptedAt:now-1});
+ const terminal=viewRunStatus(project(history([event(1,'lifecycle',{phase:'end'})])),now);
+ for(const status of [observed('idle'),observed('unknown'),observed('active',{freshUntil:0}),terminal,
+  observed('idle',{observedAt:submission.acceptedAt})]){
+  assert.equal(stoppableRunId({context,status,submission,now}),null);
+ }
+ const replacement=observed('active',{runId:'next-run'});
+ assert.equal(stoppableRunId({context,status:replacement,submission,now}),'next-run');
+});
+
+test('stale, future and disconnected evidence cannot retain a Stop target',()=>{
+ const status=observed(),submission=submitted();
+ for(const input of [{status},{submission},{status,submission}]){
+  assert.equal(stoppableRunId({context,...input,now:now+RUN_FRESH_MS}),input.status?'observed-run':'owned-run');
+  assert.equal(stoppableRunId({context,...input,now:now+RUN_FRESH_MS+1}),null);
+  assert.equal(stoppableRunId({context,...input,now,connected:false}),null);
+ }
+ assert.equal(stoppableRunId({context,submission:submitted({acceptedAt:now+1}),now}),null);
+ assert.equal(stoppableRunId({context,status:observed('active',{observedAt:now+1}),now}),null);
+ assert.equal(stoppableRunId({context,status:{...status,stale:true},now}),null);
+ assert.equal(stoppableRunId({context,status:{...status,active:false},now}),null);
+});
+
+test('stale telemetry or a superseded receipt cannot resurrect an earlier Stop target',()=>{
+ const submission=submitted();
+ for(const status of [observed('active',{observedAt:now-1,freshUntil:0}),
+  observed('idle',{observedAt:now-RUN_FRESH_MS-1,freshUntil:now-1}),
+  {...observed('active',{observedAt:now-1}),stale:true}]){
+  assert.equal(stoppableRunId({context,status,submission,now}),null);
+ }
+ const superseded={...submission,stopReceiptSuperseded:true};
+ for(const status of [null,observed('idle',{observedAt:now-1}),observed('unknown',{observedAt:now-1})]){
+  assert.equal(stoppableRunId({context,status,submission:superseded,now}),null);
+ }
+ assert.equal(stoppableRunId({context,status:observed(),submission:superseded,now}),'observed-run');
+});
+
+test('admission-only, completed, stopped and uncertain sends never manufacture a running target',()=>{
+ for(const phase of ['accepted','ok','aborted','stopped',undefined]){
+  assert.equal(stoppableRunId({context,submission:submitted({receipt:{status:phase,runId:'owned-run'}}),now}),null);
+ }
+ for(const state of ['sending','uncertain','rejected'])assert.equal(stoppableRunId({context,submission:submitted({status:state}),now}),null);
+ for(const receipt of [{status:'started'},{status:'in_flight',runId:''}])assert.equal(stoppableRunId({context,submission:submitted({receipt}),now}),null);
+});
+
+test('Stop projection is pure and requires an explicit presentation clock',()=>{
+ const status=observed(),submission=submitted(),before=structuredClone({context,status,submission});
+ stoppableRunId({context,status,submission,now});assert.deepEqual({context,status,submission},before);
+ for(const invalid of [undefined,0,NaN,Infinity])assert.throws(()=>stoppableRunId({context,status,submission,now:invalid}),TypeError);
 });

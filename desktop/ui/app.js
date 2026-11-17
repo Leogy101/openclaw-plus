@@ -1,6 +1,6 @@
 import { linkedText, reportText, formatAsyncReply, groupTranscriptMessages } from './content.mjs';
 import { viewAtTime, mergeTimeline } from '../shared/activity-model.mjs';
-import { viewRunStatus } from '../shared/run-status.mjs';
+import { viewRunStatus, stoppableRunId, RUN_FRESH_MS } from '../shared/run-status.mjs';
 import { helperTasksFromMessages } from '../shared/helper-tasks.mjs';
 import { projectAsyncQuestions } from '../shared/async-questions.mjs';
 import { createTerminalView } from './terminal-view.mjs';
@@ -42,6 +42,8 @@ const requests = {overview:0, history:0, questions:0, work:0, automations:0, run
 const drafts=new Map();
 const sends=new Map();
 const composerRecords=new Map();
+let slashMenu=null;
+let slashCatalog=null;
 const asyncReplyDrafts=new Map();
 const approvalMutations=new Map();
 const planDisclosure=new Map();
@@ -155,9 +157,11 @@ function sessionButton(item, cls='session-item', label=null, child=false) {
 }
 function failure(title, message, retry) { return `<div class="error-note"><strong>${esc(title)}</strong>${esc(message)}${retry ? btn(retry,'Try again') : ''}</div>`; }
 function limitsHTML(limits=[]) { return limits.filter(Boolean).map(item=>`<p class="limit-note">${linkedText(typeof item === 'string' ? item : item.message || item.reason || 'Some records are not available through this connection.')}</p>`).join(''); }
-function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();syncAsyncReplyForms();renderPermissionDialog();renderVoiceStatus(); }
+function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();syncAsyncReplyForms();renderPermissionDialog();syncNewConversationDialog();renderVoiceStatus(); }
 function renderConnection() {
   renderActivityIndicators();renderActivityCurrent();renderRunStatus();scheduleActivityFreshness();
+  renderContextMeter();
+  if(!online()){closeSlashMenu();slashCatalog=null;}
   const label=state.connection.label || 'Local OpenClaw';
   const status=state.connection.status || 'unknown';
   $('title-connection').textContent=`${label} · ${status === 'connected' ? 'Connected' : status}`;
@@ -370,7 +374,9 @@ function renderHistory({initial=false, older=false, follow=false}={}) {
     if(state.history) {
       if(state.historyStale)html+='<div class="error-note">Earlier history is preserved while you read. '+btn('refresh-history','Refresh latest messages','text-btn')+' to resume current snapshots.</div>';
       if(state.history.hasMore) html+=`<div class="history-tools">${btn('older-history',state.historyLoading?'Loading earlier messages…':'Load earlier messages','button',state.historyLoading?'disabled':'')}</div>`;
-      if(!state.history.messages.length) html+='<div class="empty"><h2>No readable messages</h2><p>This session has no returned message history. It may be empty or outside the current access scope.</p></div>';
+      if(!state.history.messages.length) html+=selected.newlyCreated&&state.history.total===0&&!state.history.hasActiveRun?
+        `<div class="empty">${icon('chat')}<h2>Start a conversation</h2><p>Send a message to ${esc(nameFor(selected.agentId))} to begin.</p></div>`:
+        '<div class="empty"><h2>No readable messages</h2><p>This session has no returned message history. It may be empty or outside the current access scope.</p></div>';
       html+=transcriptHTML(state.history.messages);
       if(state.history.inFlight?.text) html+=`<article class="message" data-message-id="live:${esc(state.history.inFlight.runId||'response')}" data-message-role="assistant"><div class="live-running"><i class="dot"></i>${online()?'Active response':'Last observed active response'}</div><div class="message-text">${reportText(state.history.inFlight.text)}</div></article>`;
       else if(state.history.hasActiveRun) html+=`<div class="live-running"><i class="dot"></i>${online()?'An active run is reported for this session.':'This session had an active run at the last observation.'}</div>`;
@@ -542,6 +548,10 @@ async function loadOverview({more=false,initial=false,poll=false}={}) {
     state.agents=Array.isArray(data.agents)?data.agents:[];
     const sessions=(Array.isArray(data.sessions)?data.sessions:[]).filter(item=>item?.key);
     sessions.forEach(cacheSession);
+    if(state.selected?.newlyCreated){
+      const current=sessions.find(item=>identity(item)===identity(state.selected));
+      if(current?.title)state.selected.title=current.title;
+    }
     state.sessions=more?[...new Map([...state.sessions,...sessions].map(item=>[identity(item),item])).values()]:sessions;
     state.page={offset,limit:sessions.length || 50,...data.page};if(!Number.isFinite(state.page.total)&&Number.isFinite(state.page.totalCount))state.page.total=state.page.totalCount;
     state.limits=data.limitations || []; state.overviewReady=true;
@@ -565,7 +575,7 @@ async function loadHistory({older=false,initial=false,latest=false,animate=false
     if((data.key&&data.key!==selected.key)||(selected.sessionId&&data.sessionId&&data.sessionId!==selected.sessionId))throw Object.assign(new Error('This session identity changed after selection. No replacement conversation was opened.'),{code:'SESSION_CHANGED'});
     state.historySendBlocked=false;
     const messages=Array.isArray(data.messages)?data.messages:[];
-    if(older&&previous){state.history={...data,pageSize:messages.length,messages:[...new Map([...messages,...previous.messages].map(item=>[item.id,item])).values()],hasActiveRun:data.hasActiveRun??previous.hasActiveRun,inFlight:data.inFlight??previous.inFlight};state.historyExtended=true;}
+    if(older&&previous){state.history={...data,pageSize:messages.length,messages:[...new Map([...messages,...previous.messages].map(item=>[item.id,item])).values()],hasActiveRun:data.hasActiveRun??previous.hasActiveRun,inFlight:data.inFlight??previous.inFlight,contextUsage:previous.contextUsage};state.historyExtended=true;}
     else state.history={...data,pageSize:messages.length,messages};
     if(!older){rememberQuestionHistory(data,messages);state.questionReadAt=Date.now();state.questionError='';}
     projectQuestions();
@@ -583,6 +593,7 @@ async function loadLatestQuestions({force=false}={}) {
     const data=await rpc('history',{...sessionParams(selected),offset:0});
     if(generation!==requests.questions||key!==identity(state.selected))return;
     if(data.key!==selected.key||selected.sessionId&&data.sessionId!==selected.sessionId)throw Object.assign(new Error('This conversation changed. Refresh its latest messages before answering.'),{code:'SESSION_CHANGED'});
+    if(state.history)state.history.contextUsage=data.contextUsage;
     rememberQuestionHistory(data,Array.isArray(data.messages)?data.messages:[]);state.questionError='';projectQuestions();
   }catch(error){if(generation===requests.questions&&key===identity(state.selected)){state.questionError=errorText(error);if(['ACCESS','DENIED','SESSION_CHANGED'].includes(error.code)){state.historySendBlocked=true;state.questionProjection={pending:[],statuses:[]};}}}
   finally{if(generation===requests.questions&&key===identity(state.selected)){state.questionLoading=false;state.questionReadAt=Date.now();renderHistory();}}
@@ -647,7 +658,78 @@ function showDialog(title,body,{search=false}={}) {
   $('overlay').innerHTML=`<div class="backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><div class="modal-head"><h2 id="dialog-title">${esc(title)}</h2>${btn('close-dialog',icon('close'),'icon-btn','aria-label="Close dialog"')}</div><div class="modal-body dialog-copy">${body}</div></section></div>`;
   layout();$('overlay').querySelector('input,button')?.focus();
 }
-function closeDialog() {const focus=state.modalReturn;state.modal=null;$('overlay').innerHTML='';layout();if(focus)document.querySelector(focus)?.focus({preventScroll:true});}
+function closeDialog() {
+  if(state.modal?.operation?.kind==='new-conversation'&&state.modal.operation.busy)return;
+  const focus=state.modalReturn;state.modal=null;$('overlay').innerHTML='';layout();if(focus)document.querySelector(focus)?.focus({preventScroll:true});
+}
+function openNewConversation() {
+  if(!online()){toast('Connect to OpenClaw to start a conversation.');return;}
+  const agents=state.agents.filter(agent=>agent.id);
+  if(!agents.length){toast(state.overviewLoading?'Wait for OpenClaw to load your agents.':'OpenClaw did not return any agents for a new conversation.');return;}
+  const preferred=agents.some(agent=>agent.id===state.selected?.agentId)?state.selected.agentId:agents[0].id;
+  const options=agents.map(agent=>`<option value="${esc(agent.id)}" ${agent.id===preferred?'selected':''}>${esc(agent.name||agent.id)}</option>`).join('');
+  showDialog('New Conversation',`
+    <label class="modal-label" for="new-conversation-agent">Agent</label>
+    <select class="scenario-select" id="new-conversation-agent">${options}</select>
+    <div class="dialog-error" id="new-conversation-status" role="status"></div>
+    <div class="control-actions">
+      ${btn('close-dialog','Cancel','button','id="cancel-new-conversation"')}
+      ${btn('create-conversation','Create','button primary','id="create-conversation"')}
+    </div>`);
+  state.modal.operation={kind:'new-conversation',request:null,busy:false,uncertain:false,unsupported:false,error:''};
+  $('new-conversation-agent').focus();
+}
+function syncNewConversationDialog() {
+  const operation=state.modal?.operation;
+  if(operation?.kind!=='new-conversation')return;
+  const {busy,uncertain,unsupported,error}=operation;
+  const button=$('create-conversation'),status=$('new-conversation-status');
+  $('new-conversation-agent').disabled=busy||uncertain;
+  $('cancel-new-conversation').disabled=busy;
+  $('overlay').querySelector('.modal-head button').disabled=busy;
+  button.disabled=busy||unsupported||!online();
+  button.textContent=busy?(uncertain?'Checking…':'Creating…'):(uncertain?'Check for conversation':'Create');
+  const message=error||(!online()?'Reconnect to OpenClaw to continue.':'');
+  if(status.textContent!==message)status.textContent=message;
+}
+async function createConversation() {
+  const operation=state.modal?.operation;
+  if(operation?.kind!=='new-conversation'||operation.busy||operation.unsupported||!online())return;
+  const request=operation.request||{agentId:$('new-conversation-agent').value,requestId:crypto.randomUUID()};
+  operation.request=request;
+  operation.busy=true;
+  operation.error='';
+  syncNewConversationDialog();
+  let item;
+  try {
+    item=await rpc('createConversation',request);
+  } catch(error) {
+    operation.uncertain=operation.uncertain||!mutationRejected(error);
+    operation.unsupported=error.code==='UNSUPPORTED';
+    operation.error=operation.uncertain?
+      'OpenClaw has not confirmed the new conversation. Check for it before creating another.':
+      errorText(error);
+    if(!operation.uncertain)operation.request=null;
+  } finally {
+    operation.busy=false;
+    if(state.modal?.operation===operation)syncNewConversationDialog();
+  }
+  if(!item)return;
+  cacheSession(item);
+  state.sessions=[item,...state.sessions.filter(session=>identity(session)!==identity(item))];
+  if(Number.isFinite(state.page.total))state.page.total=Math.max(state.page.total,state.sessions.length);
+  if(state.modal?.operation===operation){
+    closeDialog();
+    clearTimeout(searchTimer);
+    state.query='';
+    state.agentId='';
+    $('session-search').value='';
+    if(viewWidth()<1280)state.panel=false;
+    selectSession({...item,newlyCreated:true});
+    $('composer-input').focus({preventScroll:true});
+  }
+  loadOverview();
+}
 function quickOpen() {showDialog('Quick Open','<label class="sr-only" for="palette-search">Find a loaded conversation or view</label><input id="palette-search" class="session-search" placeholder="Find a loaded conversation or view…" autocomplete="off"><div id="palette-results" class="palette-items"></div><p class="limit-note">Searches the loaded session list. Use sidebar search to query the gateway.</p>',{search:true});renderPalette('');$('palette-search').focus();}
 function renderPalette(query) {const q=query.toLowerCase();replaceRegion('palette-results',state.sessions.filter(item=>`${item.title} ${nameFor(item.agentId)}`.toLowerCase().includes(q)).map(item=>sessionButton(item,'palette-item',`${icon('chat')}<span class="grow">${esc(item.title || 'Conversation')}<span class="small muted">${esc(nameFor(item.agentId))}</span></span>`,true)).join('')+['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Settings'].filter(view=>view.toLowerCase().includes(q)).map(view=>btn('view',icon('settings')+esc(view),'palette-item',`data-view="${view}"`)).join('') || '<p class="region-note">No loaded matches.</p>');}
 function connectionDialog() {showDialog('Connection',`<dl class="detail-grid"><dt>Gateway</dt><dd>${esc(state.connection.label)}</dd><dt>Status</dt><dd>${esc(state.connection.status)}</dd><dt>Runtime</dt><dd>${esc(state.connection.version || 'Not verified')}</dd><dt>Installed CLI</dt><dd>${esc(state.connection.installedVersion || 'Unknown')}</dd><dt>Protocol</dt><dd>${esc(state.connection.protocol || 'Unknown')}</dd><dt>Access</dt><dd>Gateway permissions apply</dd></dl><p>${esc(state.connection.message || 'The desktop reads your existing sessions and work through the OpenClaw gateway. Messages, approval decisions and configuration changes use your existing OpenClaw permissions.')}</p><div class="top-space">${btn('reconnect','Reconnect')}${btn('original','Open original OpenClaw ↗')}</div>`);}
@@ -667,7 +749,7 @@ function toggleWork(force) {if(state.view==='Models')return;state.panel=force??!
 function runCommand(command) {
   if(command.startsWith('theme:')){setTheme(command.slice(6));return;}
   if(state.modal||modelsView?.isDialogOpen()){toast('Close the current dialog before switching views.');return;}
-  if(command==='new'){openView('Conversations');$('composer-input')?.focus();toast('Choose an existing conversation to send a message. New conversation creation remains available in original OpenClaw.');}
+  if(command==='new')openNewConversation();
   else if(command==='quick-open')quickOpen();
   else if(command==='toggle-navigation'){if(viewWidth()<1000)state.navOpen=!state.navOpen;else state.navHidden=!state.navHidden;layout();}
   else if(command==='toggle-work')toggleWork();
@@ -677,6 +759,9 @@ function runCommand(command) {
 }
 async function handleAction(node) {
   const action=node.dataset.action;
+  if(action==='complete-slash-command'){completeSlashCommand(Number(node.dataset.index));return;}
+  if(action==='new'){runCommand('new');return;}
+  if(action==='create-conversation'){createConversation();return;}
   if(action==='helper-dispatch'){viewHelperDispatch(node.dataset.helperContext,node.dataset.helperId);return;}
   if(action==='activity-open'){if(!state.panel)toggleWork(true);state.panelTab='work';state.processId=null;layout();renderWork();$('activity-current')?.scrollIntoView({block:'nearest'});return;}
   if(action==='refresh-activity'){loadActivity(state.workContext||state.selected,{force:true});return;}
@@ -905,26 +990,215 @@ async function removeMedia(id) {
   catch(error){record.error=errorText(error);}
   finally{record.picking=false;if(identity(state.selected)===key)renderComposer();}
 }
+function composerStopTarget() {
+  if(state.historySendBlocked)return null;
+  const status=selectedRunStatus(),submission=sends.get(identity(state.selected));
+  // Once telemetry supersedes an acknowledgement, an older refresh cannot revive it.
+  if(submission?.status==='accepted'&&status?.observedAt>=submission.acceptedAt)submission.stopReceiptSuperseded=true;
+  return stoppableRunId({context:state.selected,status,submission,now:Date.now(),connected:online()});
+}
+function composerActionHTML() {
+  const draft=draftFor(),send=sends.get(identity(state.selected)),record=composerRecord();
+  const pending=send?.status==='sending',uncertain=send?.status==='uncertain',retry=uncertain&&!send.asyncReplyKey;
+  const busy=record.saving||record.picking,hasDraft=Boolean(draft.text.trim())||draft.attachments.length>0;
+  const target=composerStopTarget(),runId=!pending&&!uncertain&&!hasDraft?target:null;
+  if(runId)return btn('review-stop',icon('stop')+' Stop','button primary composer-stop',`id="send-message" aria-label="Stop response" data-context="${esc(identity(state.selected))}" data-run="${esc(runId)}" ${busy||record.uncertain?'disabled':''}`);
+  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historySendBlocked&&!pending&&!busy&&!record.uncertain&&(!uncertain||retry)&&(retry||hasDraft);
+  return btn('send',icon('up')+` ${pending?'Sending…':retry?'Retry same message':'Send'}`,'button primary',`${canSend?'':'disabled'} id="send-message" aria-label="${retry?'Retry the same message request':'Send message'}"`);
+}
+function renderComposerAction() {if($('composer-action'))replaceRegion('composer-action',composerActionHTML());}
+function mountComposerControls() {
+  const controls=$('composer-controls');
+  if(controls.firstElementChild)return;
+  controls.innerHTML=`<div class="slash-menu" id="slash-menu" hidden>
+    <div class="slash-menu-heading"><strong>Slash commands</strong><span>↑ ↓ to move · Enter to insert</span></div>
+    <div id="slash-menu-status" class="slash-menu-status" role="status" hidden></div>
+    <div id="slash-options" role="listbox" aria-label="Slash commands"></div>
+  </div><div class="composer-tools">
+    ${btn('attach-media',icon('plus'),'icon-btn composer-attach','id="attach-media" aria-label="Attach media" title="Attach files · up to 4 files, 12 MiB total (images up to 6 MiB each)" disabled')}
+    ${btn('permissions',icon('shield'),'icon-btn composer-permissions','id="composer-permissions" aria-label="Execution permissions" title="Review execution permissions for this conversation" disabled')}
+    ${btn('voice-menu',icon('mic'),'icon-btn composer-voice','id="composer-voice" aria-label="Voice options" title="Dictate or start a live voice conversation" disabled')}
+    <label class="sr-only" for="composer-model">Model</label>
+    <select id="composer-model" class="composer-select" disabled></select>
+    <label class="sr-only" for="composer-reasoning">Reasoning level</label>
+    <select id="composer-reasoning" class="composer-select" title="Reasoning level for this session" disabled></select>
+    <span id="composer-context" class="composer-context" hidden>
+      <span class="context-ring" aria-hidden="true"></span>
+      <span aria-hidden="true">Context <span id="composer-context-percent">—</span></span>
+    </span>
+  </div><div class="row composer-send" id="composer-action"></div>`;
+}
+const composerOptionMarkup=new WeakMap();
+function syncComposerSelect(select, markup, value, disabled) {
+  // A native popup closes if a refresh replaces the select or its options.
+  if(composerOptionMarkup.get(select)!==markup){
+    select.innerHTML=markup;
+    composerOptionMarkup.set(select,markup);
+  }
+  if(select.value!==value)select.value=value;
+  if(select.disabled!==disabled)select.disabled=disabled;
+}
+function renderContextMeter() {
+  const meter=$('composer-context');
+  if(!meter)return;
+  meter.hidden=!state.selected;
+  if(meter.hidden)return;
+
+  const {history,selected}=state;
+  const record=composerRecord(selected),currentModel=record.options?.current?.model;
+  const usage=history?.contextUsage;
+  const matchesModel=!currentModel||!usage?.modelRef||usage.modelRef===currentModel;
+  const known=usage&&matchesModel&&!record.uncertain&&!state.historySendBlocked&&
+    history.key===selected.key&&history.sessionId===selected.sessionId;
+  const ratio=known?usage.usedTokens/usage.capacityTokens:0;
+  const percent=Math.min(100,Math.round(ratio*100));
+  const approximate=known&&(usage.fresh!==true||!online()||Boolean(state.historyError||state.historyExtended&&state.questionError));
+  const label=known?`${approximate?'~':''}${percent}%`:'—';
+  const budget=known&&usage.budget==='prompt'?'Prompt budget (last run)':'Context window';
+  const detail=known?
+    `${approximate?'Approximately ':''}${percent}% used · ${usage.usedTokens.toLocaleString()} / ${usage.capacityTokens.toLocaleString()} tokens · ${budget}`:
+    'Context usage unavailable';
+  if(meter.title===detail)return;
+
+  meter.title=detail;
+  meter.dataset.state=!known?'unknown':approximate?'approximate':ratio>=.85?'high':'current';
+  meter.style.setProperty('--context-fill',`${Math.min(1,ratio)*100}%`);
+  $('composer-context-percent').textContent=label;
+  meter.setAttribute('role',known?'meter':'img');
+  meter.setAttribute('aria-label',known?'Context usage':detail);
+  if(known){
+    meter.setAttribute('aria-valuenow',String(percent));
+    meter.setAttribute('aria-valuetext',detail);
+  }else{
+    meter.removeAttribute('aria-valuenow');
+    meter.removeAttribute('aria-valuetext');
+  }
+}
+function slashToken(input) {
+  if(input.selectionStart!==input.selectionEnd||input.selectionStart===0)return null;
+  const token=input.value.match(/^\/[a-z0-9_-]*(?=\s|$)/i)?.[0];
+  if(!token||input.selectionStart>token.length)return null;
+  return {end:token.length,query:input.value.slice(1,input.selectionStart).toLowerCase()};
+}
+function closeSlashMenu() {
+  if(!slashMenu)return;
+  slashMenu=null;
+  if($('slash-menu'))$('slash-menu').hidden=true;
+  const input=$('composer-input');
+  input?.removeAttribute('aria-activedescendant');
+  input?.removeAttribute('aria-controls');
+  input?.removeAttribute('aria-autocomplete');
+}
+function highlightSlashCommand(index,{scroll=false}={}) {
+  const list=$('slash-options'),option=list?.children[index];
+  if(!slashMenu||!option)return;
+  list.querySelector('[aria-selected="true"]')?.setAttribute('aria-selected','false');
+  slashMenu.index=index;
+  option.setAttribute('aria-selected','true');
+  $('composer-input').setAttribute('aria-activedescendant',option.id);
+  if(scroll)option.scrollIntoView({block:'nearest'});
+}
+function renderSlashMenu() {
+  if(!slashMenu||!$('slash-menu')||slashCatalog?.key!==slashMenu.key)return;
+  const {query}=slashMenu;
+  const items=slashCatalog.commands.filter(command=>[command.name,...command.aliases].some(name=>name.toLowerCase().startsWith(query)));
+  slashMenu.items=items;
+  const list=$('slash-options'),status=$('slash-menu-status'),input=$('composer-input');
+  $('slash-menu').hidden=false;
+  input.setAttribute('aria-controls','slash-options');
+  input.setAttribute('aria-autocomplete','list');
+  input.removeAttribute('aria-activedescendant');
+  status.hidden=items.length>0;
+  status.textContent=slashCatalog.loading?'Loading commands…':slashCatalog.unavailable?'OpenClaw command list unavailable. You can still type a command.':query?'No matching commands.':'No commands available for this conversation.';
+  list.innerHTML=items.map((item,index)=>btn('complete-slash-command',
+    `<span class="slash-command-name">/${esc(item.name)}</span>${item.description?` <span class="slash-command-description">${esc(item.description)}</span>`:''}`,
+    'slash-command-option',`id="slash-option-${index}" role="option" aria-selected="false" tabindex="-1" data-index="${index}"`)).join('');
+  if(items.length){list.scrollTop=0;highlightSlashCommand(0);}
+}
+async function requestSlashCatalog(context,key) {
+  const catalog={key,commands:[],loading:true,unavailable:false,expiresAt:0};
+  slashCatalog=catalog;
+  try {
+    const result=await rpc('slashCommandCatalog',sessionParams(context));
+    catalog.commands=Array.isArray(result?.commands)?result.commands:[];
+  } catch {
+    catalog.unavailable=true;
+  } finally {
+    catalog.loading=false;
+    catalog.expiresAt=Date.now()+(catalog.unavailable?10000:60000);
+    if(slashCatalog===catalog&&slashMenu?.key===key)renderSlashMenu();
+  }
+}
+function updateSlashMenu(input) {
+  const token=slashToken(input);
+  if(!token||!online()||!state.selected?.agentId||!state.selected.sessionId||state.historySendBlocked||state.modal){
+    closeSlashMenu();return;
+  }
+  const key=identity(state.selected),wasOpen=slashMenu?.key===key;
+  if(wasOpen&&slashMenu.query===token.query)return;
+  slashMenu={key,query:token.query,index:0,items:[]};
+  if(slashCatalog?.key!==key||!wasOpen&&!slashCatalog.loading&&Date.now()>=slashCatalog.expiresAt){
+    requestSlashCatalog({...state.selected},key);
+  }
+  renderSlashMenu();
+}
+function completeSlashCommand(index) {
+  const input=$('composer-input'),item=slashMenu?.items[index];
+  const token=input&&slashToken(input);
+  if(!item||!token||!online()||state.historySendBlocked||slashMenu.key!==identity(state.selected)||token.query!==slashMenu.query)return;
+  const space=item.acceptsArgs&&token.end===input.value.length?' ':'';
+  input.setRangeText(`/${item.name}${space}`,0,token.end,'end');
+  const draft=draftFor();draft.text=input.value;draft.revision++;
+  closeSlashMenu();
+  renderComposer();
+  input.focus({preventScroll:true});
+}
+function handleSlashKey(event) {
+  if(!slashMenu||event.target.id!=='composer-input')return false;
+  const count=slashMenu.items.length;
+  if(event.key==='Escape'){event.preventDefault();closeSlashMenu();return true;}
+  if(['ArrowDown','ArrowUp'].includes(event.key)&&!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){
+    event.preventDefault();
+    if(count)highlightSlashCommand((slashMenu.index+(event.key==='ArrowDown'?1:-1)+count)%count,{scroll:true});
+    return true;
+  }
+  if(!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey&&(event.key==='Enter'||event.key==='Tab'&&count)){
+    event.preventDefault();completeSlashCommand(slashMenu.index);return true;
+  }
+  return false;
+}
 function renderComposer() {
   const input=$('composer-input');if(!input)return;
   const key=identity(state.selected),draft=draftFor(),send=sends.get(key),record=composerRecord(),options=record.options;
-  if(input.dataset.session!==key){input.dataset.session=key;input.value=draft.text;}
+  if(input.dataset.session!==key){
+    closeSlashMenu();
+    if(document.activeElement?.closest('.composer-select'))document.activeElement.blur();
+    input.dataset.session=key;input.value=draft.text;
+  }
+  if(state.historySendBlocked||state.modal)closeSlashMenu();
   input.disabled=!state.selected;
   input.placeholder=state.selected?`Message ${nameFor(state.selected.agentId)}…`:'Choose a conversation to write a message';
   const pending=send?.status==='sending',uncertain=send?.status==='uncertain',frozen=pending||uncertain;
-  const runIds=Array.isArray(state.history?.activeRunIds)?state.history.activeRunIds:[];
   const busy=record.saving||record.picking;
-  const retry=uncertain&&!send.asyncReplyKey;
-  const canSend=online()&&Boolean(state.selected)&&Boolean(state.history)&&!state.historySendBlocked&&!pending&&!busy&&!record.uncertain&&(!uncertain||retry)&&(retry||Boolean(draft.text.trim())||draft.attachments.length>0);
   const disabled=!online()||!state.selected||frozen||busy;
   const models=options?.models||[],model=models.find(item=>item.value===options?.current?.model),levels=model?.thinkingLevels||[];
   const unavailableModel=options?.current?.model&&!model;
-  const modelOptions=(model?'':`<option value="" disabled selected>${esc(record.loading?'Loading models…':unavailableModel?'Current model unavailable':'Model unavailable')}</option>`)+models.map(item=>`<option value="${esc(item.value)}" ${item.value===options?.current?.model?'selected':''} ${item.available===false||item.manualSelectionAllowed===false?'disabled':''}>${esc(item.label||item.value)}</option>`).join('');
-  const currentLevel=options?.current?.thinkingLevel;
-  const reasoningOptions=(levels.some(item=>item.id===currentLevel)?'':`<option value="" disabled selected>${esc(record.loading?'Loading…':'Reasoning unavailable')}</option>`)+levels.map(item=>`<option value="${esc(item.id)}" ${item.id===currentLevel?'selected':''}>${esc(item.label||item.id)}</option>`).join('');
+  const modelOptions=(model?'':`<option value="" disabled>${record.loading?'Loading models…':unavailableModel?'Current model unavailable':'Model unavailable'}</option>`)+models.map(item=>`<option value="${esc(item.value)}" ${item.available===false||item.manualSelectionAllowed===false?'disabled':''}>${esc(item.label||item.value)}</option>`).join('');
+  const currentLevel=levels.find(item=>item.id===options?.current?.thinkingLevel)?.id||'';
+  const reasoningOptions=(currentLevel?'':`<option value="" disabled>${record.loading?'Loading…':'Reasoning unavailable'}</option>`)+levels.map(item=>`<option value="${esc(item.id)}">${esc(item.label||item.id)}</option>`).join('');
   const lockReason=options?.modelSelectionLocked?'Model selection is locked by OpenClaw for this session.':'Choose this session’s model';
   replaceRegion('composer-attachments',draft.attachments.map(item=>`<span class="composer-attachment" data-attachment-id="${esc(item.id)}" title="${esc(item.name)} · ${Math.ceil(Number(item.sizeBytes||0)/1024)} KB">${icon('file')}<span>${esc(item.name)}</span>${btn('remove-attachment',icon('close'),'icon-btn',`data-attachment="${esc(item.id)}" data-focus="attachment-${esc(item.id)}" aria-label="Remove attachment ${esc(item.name)}" ${frozen||busy?'disabled':''}`)}</span>`).join(''));
-  replaceRegion('composer-controls',`<div class="composer-tools">${btn('attach-media',icon('plus'),'icon-btn composer-attach',`id="attach-media" aria-label="Attach media" title="Attach files · up to 4 files, 12 MiB total (images up to 6 MiB each)" ${disabled||draft.attachments.length>=4||!desktop?.pickAttachments?'disabled':''}`)}${btn('permissions',icon('shield'),'icon-btn composer-permissions',`id="composer-permissions" aria-label="Execution permissions" title="Review execution permissions for this conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId?'disabled':''}`)}${btn('voice-menu',icon('mic'),'icon-btn composer-voice',`id="composer-voice" aria-label="Voice options" title="Dictate or start a live voice conversation" ${!online()||!state.selected?.sessionId||!state.selected?.agentId||!voiceView?'disabled':''}`)}<label class="sr-only" for="composer-model">Model</label><select id="composer-model" class="composer-select" title="${esc(lockReason)}" ${disabled||record.loading||record.uncertain||options?.modelSelectionLocked||!models.length?'disabled':''}>${modelOptions}</select><label class="sr-only" for="composer-reasoning">Reasoning level</label><select id="composer-reasoning" class="composer-select" title="Reasoning level for this session" ${disabled||record.loading||record.uncertain||!levels.length?'disabled':''}>${reasoningOptions}</select></div><div class="row composer-send">${runIds.length===1?btn('review-stop','Stop response','text-btn',`data-run="${esc(runIds[0])}" ${online()?'':'disabled'}`):''}${btn('send',icon('up')+` ${pending?'Sending…':retry?'Retry same message':'Send'}`,'button primary',`${canSend?'':'disabled'} id="send-message" aria-label="${retry?'Retry the same message request':'Send message'}"`)}</div>`);
+  mountComposerControls();
+  $('attach-media').disabled=disabled||draft.attachments.length>=4||!desktop?.pickAttachments;
+  const exactSession=online()&&Boolean(state.selected?.sessionId&&state.selected?.agentId);
+  $('composer-permissions').disabled=!exactSession;
+  $('composer-voice').disabled=!exactSession||!voiceView;
+  const modelPicker=$('composer-model'),settingsDisabled=disabled||record.loading||record.uncertain;
+  if(modelPicker.title!==lockReason)modelPicker.title=lockReason;
+  syncComposerSelect(modelPicker,modelOptions,model?.value||'',settingsDisabled||options?.modelSelectionLocked===true||!models.length);
+  syncComposerSelect($('composer-reasoning'),reasoningOptions,currentLevel,settingsDisabled||!levels.length);
+  renderContextMeter();
+  renderComposerAction();
   const note=record.error||((options?.modelSelectionLocked?'Model selection is locked by OpenClaw for this session. ':'' )+(options?.limitations||[]).map(item=>typeof item==='string'?item:item.message||'').filter(Boolean).join(' '));
   replaceRegion('composer-options-error',note?`<p class="composer-option-note ${record.error?'is-error':''}">${esc(note)}${record.error?btn('refresh-composer','Refresh options','text-btn',`${record.loading||busy||!online()?'disabled':''}`):''}</p>`:'');
   let message=!online()?'Disconnected. Your draft stays here until the connection returns.':'';
@@ -952,7 +1226,7 @@ async function submitMessage(request) {
   request.status='sending';request.error='';renderComposer();
   try {
     const result=await rpc('send',{...sessionParams(request.selected),message:request.message,requestId:request.requestId,...(request.attachmentIds.length?{attachmentIds:request.attachmentIds}:{}),...(request.replyToId?{replyToId:request.replyToId}:{}),...(request.expectedLeafEntryId!==undefined?{expectedLeafEntryId:request.expectedLeafEntryId}:{})});
-    request.status='accepted';request.receipt=result;request.runId=result.runId;
+    request.status='accepted';request.receipt=result;request.runId=result.runId;request.acceptedAt=Date.now();
     if(!request.asyncReplyKey){
       const current=draftFor(request.selected);
       current.attachments=current.attachments.filter(item=>!request.attachmentIds.includes(item.id));
@@ -964,8 +1238,11 @@ async function submitMessage(request) {
   finally{if(identity(state.selected)===key)renderComposer();}
 }
 function reviewStop(node) {
-  if(!state.selected)return;
-  const selected={...state.selected},runId=node.dataset.run;
+  if(!state.selected||!online())return;
+  const selected={...state.selected},runId=node.dataset.run,draft=draftFor(selected),send=sends.get(identity(selected)),record=composerRecord(selected);
+  // A captured button must still belong to this exact response and empty draft.
+  if(node.dataset.context!==identity(selected)||runId!==composerStopTarget()||draft.text.trim()||draft.attachments.length||
+      ['sending','uncertain'].includes(send?.status)||record.saving||record.picking||record.uncertain){renderComposerAction();return;}
   showDialog('Stop this response?',`<p>Stop this exact run: <code>${esc(runId)}</code> in ${esc(nameFor(selected.agentId))}’s selected conversation. OpenClaw may also stop work delegated by it.</p><div class="dialog-error" id="mutation-status" role="status"></div><div class="control-actions">${btn('close-dialog','Keep running')}${btn('confirm-stop','Stop this response','button danger')}</div>`);
   state.modal.operation={kind:'stop',selected,runId};
 }
@@ -1124,6 +1401,7 @@ function runDuration(milliseconds) {
 }
 function renderRunStatus() {
   if(!$('run-status'))return;
+  renderComposerAction();
   const status=selectedRunStatus();
   const existing=$('run-status').querySelector('.run-status-bar');
   // Selection can defer text replacement, but an expired observation must stop animating now.
@@ -1246,8 +1524,10 @@ function scheduleActivityFreshness() {
   clearTimeout(activityFreshnessTimer);
   const now=Date.now(),status=selectedRunStatus(),deadlines=[...activityRecords.values()].map(record=>Number(record.view?.freshUntil)).filter(value=>Number.isFinite(value)&&value>now);
   if(status?.freshUntil>now)deadlines.push(status.freshUntil);
+  const submission=sends.get(identity(state.selected));
+  if(submission?.status==='accepted'&&submission.acceptedAt+RUN_FRESH_MS>now)deadlines.push(submission.acceptedAt+RUN_FRESH_MS);
   const expiresAt=deadlines.length?Math.min(...deadlines):Infinity;
-  // The one-second clock repaints only this small status region; it never performs a read.
+  // The clock repaints only response status and the primary action; it never performs a read.
   if(status?.active&&state.view==='Conversations'&&!document.hidden)deadlines.push(now+1000);
   if(deadlines.length)activityFreshnessTimer=setTimeout(()=>{if(Date.now()>=expiresAt){renderActivityIndicators();renderActivityCurrent();}renderRunStatus();scheduleActivityFreshness();},Math.max(1,Math.min(...deadlines)-now+1));
 }
@@ -1283,12 +1563,32 @@ function moreActivity() {
   else if(record.items.length<500&&record.cursor)loadActivity(context,{more:true});
 }
 
-document.addEventListener('click',event=>{const node=event.target.closest('[data-action]');if(node&&!node.disabled){event.preventDefault();handleAction(node);}else if(event.target.classList.contains('backdrop'))closeDialog();});
+document.addEventListener('click',event=>{
+  if(slashMenu&&event.target.id==='composer-input')updateSlashMenu(event.target);
+  const node=event.target.closest('[data-action]');
+  if(node&&!node.disabled){event.preventDefault();handleAction(node);}
+  else if(event.target.classList.contains('backdrop'))closeDialog();
+});
+document.addEventListener('pointerdown',event=>{
+  if(slashMenu&&event.target.id!=='composer-input'&&!event.target.closest('#slash-menu'))closeSlashMenu();
+});
+document.addEventListener('mousedown',event=>{
+  if(event.target.closest('#slash-menu [role="option"]'))event.preventDefault();
+});
+document.addEventListener('focusout',event=>{
+  if(event.target.id==='composer-input'&&!event.relatedTarget?.closest('#slash-menu'))closeSlashMenu();
+});
+document.addEventListener('keyup',event=>{
+  if(slashMenu&&event.target.id==='composer-input'&&['ArrowLeft','ArrowRight','Home','End'].includes(event.key))updateSlashMenu(event.target);
+});
 document.addEventListener('input',event=>{
   if(event.target.matches('[data-async-other]')){updateAsyncReplyInput(event.target);return;}
   if(event.target.id==='session-search'){state.query=event.target.value;requests.overview++;clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadOverview(),300);}
   if(event.target.id==='palette-search')renderPalette(event.target.value);
-  if(event.target.id==='composer-input'){const draft=draftFor();draft.text=event.target.value;draft.revision++;renderComposer();}
+  if(event.target.id==='composer-input'){
+    const draft=draftFor();draft.text=event.target.value;draft.revision++;renderComposer();
+    if(event.isComposing)closeSlashMenu();else updateSlashMenu(event.target);
+  }
   if(event.target.id==='settings-editor'){state.settings.raw=event.target.value;state.settings.dirty=event.target.value!==state.settings.sourceRaw;state.settings.error='';renderSettings();}
 });
 document.addEventListener('change',event=>{if(event.target.name==='permission-mode'||event.target.id==='permission-full-confirm'){const operation=state.modal?.operation;if(!permissionContextCurrent(operation)||operation.loading||operation.busy)return;if(event.target.id==='permission-full-confirm')operation.fullConfirmed=event.target.checked;else{const choice=operation.options?.choices.find(item=>permissionToken(item.value)===event.target.value);if(!choice)return;operation.selected=choice.value;operation.fullConfirmed=false;operation.notice='';}renderPermissionDialog();return;}if(event.target.matches('[data-async-choice]')){updateAsyncReplyInput(event.target);return;}if(event.target.id==='composer-model')changeComposerSetting('model',event.target.value);if(event.target.id==='composer-reasoning')changeComposerSetting('thinkingLevel',event.target.value);});
@@ -1308,10 +1608,12 @@ document.addEventListener('scroll',event=>{
 document.addEventListener('selectionchange',()=>{if(getSelection()?.isCollapsed)for(const [id,html]of [...pendingRegions]){if(id==='messages'){pendingRegions.delete(id);renderHistory();}else replaceRegion(id,html);}});
 document.addEventListener('keydown',event=>{
   if(event.isComposing||event.target.closest?.('#terminal-mount'))return;
+  if(handleSlashKey(event))return;
   if(event.target.id==='composer-input'&&event.key==='Enter'&&!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){event.preventDefault();sendMessage();return;}
+  if(event.key==='Escape'&&CSS.supports('selector(:open)')&&document.querySelector('.composer-select:open'))return;
   if(event.key==='Escape'){event.preventDefault();if(state.modal)closeDialog();else if(state.processId&&state.view!=='Models'){state.processId=null;renderWork();}else if(state.panel&&state.view!=='Models'&&viewWidth()<1280)toggleWork(false);else if(state.navOpen){state.navOpen=false;layout();}else if(state.stack.length)back();return;}
   const dialog=state.modal ? $('overlay').querySelector('[role="dialog"]') : state.panel&&state.view!=='Models'&&viewWidth()<1280 ? $('work-panel') : null;
-  if(event.key==='Tab'&&dialog){const focusables=[...dialog.querySelectorAll('button:not([disabled]),input,select,textarea,a[href]')].filter(node=>!node.hidden);const first=focusables[0],last=focusables.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}
+  if(event.key==='Tab'&&dialog){const focusables=[...dialog.querySelectorAll(':is(button,input,select,textarea):not(:disabled),a[href]')].filter(node=>!node.hidden);const first=focusables[0],last=focusables.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}
   if(state.modal?.search&&['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const list=[...$('palette-results').querySelectorAll('button')];const index=list.indexOf(document.activeElement);list[(index+(event.key==='ArrowDown'?1:-1)+list.length)%list.length]?.focus();}
   if(state.modal?.search&&event.key==='Enter'&&event.target.id==='palette-search'){event.preventDefault();$('palette-results').querySelector('button')?.click();}
   if(!desktop?.isDesktop&&(event.metaKey||event.ctrlKey)){const key=event.key.toLowerCase();const command=key==='k'?'quick-open':key==='n'?'new':key==='b'?'toggle-navigation':key===','?'settings':event.altKey&&key==='i'?'toggle-work':/^[1-5]$/.test(key)?'view:'+['Conversations','Agents','Projects','Activity','Automations'][+key-1]:null;if(command){event.preventDefault();runCommand(command);}}
@@ -1342,5 +1644,6 @@ readAloud=createReadAloud({rpc,onChange:()=>syncReadAloudButtons(),onError:error
 if(desktop?.voice&&desktop?.onVoiceEvent)voiceView=createVoiceController({desktop,onChange:()=>{renderVoiceStatus();renderVoiceMenu();},onError:error=>{toast(errorText(error));announce('Voice stopped. '+errorText(error));},onDictation:appendDictation,stopOtherAudio:()=>readAloud?.stop()});
 terminalView=createTerminalView({desktop,split:$('conversation-split'),mount:$('terminal-mount'),separator:$('terminal-separator'),toggleButton:$('toggle-terminal'),nameFor,onShare:appendTerminalSelection,onBeforeLayout:beforeTerminalLayout,onAfterLayout:afterTerminalLayout,notify:toast});
 $('toggle-terminal').innerHTML=icon('terminal')+' Terminal';$('toggle-navigation').innerHTML=icon('sidebar');$('toggle-work').innerHTML=icon('panel')+' Work';$('close-work').innerHTML=icon('close');
+$('new-conversation').innerHTML=icon('plus')+' New Conversation';
 if(desktop?.isDesktop)document.documentElement.classList.add('desktop');
 setTheme(state.theme);render();desktop?.onCommand?.(runCommand);desktop?.onGatewayEvent?.(gatewayEvent);loadOverview({initial:true});

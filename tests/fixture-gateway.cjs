@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const args=process.argv.slice(2);
 const stdin=args[0]==='--composer-stdin';
-if(stdin ? !['chat.send','sessions.patch','config.patch','tts.speak'].includes(args[1])||args[2]!=='ws://127.0.0.1:19999' : args[0]!=='gateway'||args[1]!=='call'||!args.includes('--expect-url')||args[args.indexOf('--expect-url')+1]!=='ws://127.0.0.1:19999') process.exit(2);
+if(stdin ? !['chat.send','sessions.patch','sessions.create','config.patch','tts.speak'].includes(args[1])||args[2]!=='ws://127.0.0.1:19999' : args[0]!=='gateway'||args[1]!=='call'||!args.includes('--expect-url')||args[args.indexOf('--expect-url')+1]!=='ws://127.0.0.1:19999') process.exit(2);
 const method=stdin?args[1]:args[2],params=JSON.parse(stdin?fs.readFileSync(0,'utf8'):args[args.indexOf('--params')+1]);
 fs.mkdirSync(process.env.HOME,{recursive:true});
 fs.appendFileSync(path.join(process.env.HOME,'fixture-calls.jsonl'),JSON.stringify({method,params})+'\n');
@@ -15,14 +15,16 @@ const make=(key,agentId,title,extra={})=>({key:'agent:'+agentId+':'+key,agentId,
 const coordinator=make('main','main','Workspace review');
 const builder=make('child','builder','Verify changes',{parentSessionKey:coordinator.key,hasActiveRun:true,activeRunIds:['run-builder']});
 const builderTwo=make('second','builder','Other Builder session');
-const rows=[coordinator,builder,builderTwo,...Array.from({length:65},(_,i)=>make('extra'+i,'main','Earlier conversation '+i))];
+const agentIds=['main','builder','reviewer','researcher','assistant-c','assistant-b','assistant-a'];
+const stateFile=path.join(process.env.HOME,'fixture-state.json');
+const persisted=fs.existsSync(stateFile)?JSON.parse(fs.readFileSync(stateFile,'utf8')):{sent:[],approvalStatus:'pending',configHash:'fixture-hash',config:{ui:{name:'Before'},models:{apiKey:'__OPENCLAW_REDACTED__'}},planRevision:1};
+const createdRows=persisted.conversations||[];
+const rows=[...createdRows,coordinator,builder,builderTwo,...Array.from({length:65},(_,i)=>make('extra'+i,'main','Earlier conversation '+i))];
 if(['fixture-terminal.json','fixture-permissions.json','fixture-voice.json'].some(name=>fs.existsSync(path.join(process.env.HOME,name)))){
  for(const row of rows)row.lifecycleRevision='fixture-lifecycle-'+row.sessionId;
 }
 const reportFile=path.join(process.env.HOME,'fixture-report.md');
 const report=fs.existsSync(reportFile)?fs.readFileSync(reportFile,'utf8'):'';
-const stateFile=path.join(process.env.HOME,'fixture-state.json');
-const persisted=fs.existsSync(stateFile)?JSON.parse(fs.readFileSync(stateFile,'utf8')):{sent:[],approvalStatus:'pending',configHash:'fixture-hash',config:{ui:{name:'Before'},models:{apiKey:'__OPENCLAW_REDACTED__'}},planRevision:1};
 for(const row of rows){
  if(persisted.permissionModes?.[row.key]!=null)row.permissionMode=persisted.permissionModes[row.key];
  if(persisted.permissionPending?.[row.key]===true)row.permissionModePending=true;
@@ -33,11 +35,11 @@ const save=()=>{fs.writeFileSync(stateFile+'.tmp',JSON.stringify(persisted));fs.
 const approval=()=>({id:'approval-fixture',status:persisted.approvalStatus,createdAtMs:1700000000000,expiresAtMs:fs.statSync(process.env.HOME).birthtimeMs+600000,sourceSessionKey:coordinator.key,presentation:{kind:'exec',commandText:'printf fixture',host:'gateway',agentId:'main',allowedDecisions:['allow-once','deny']}});
 let result;
 switch(method){
- case 'agents.list':result={defaultId:'main',agents:['main','builder','reviewer','researcher','assistant-c','assistant-b','assistant-a'].map(id=>({id,name:{main:'Coordinator',builder:'Builder',reviewer:'Reviewer',researcher:'Researcher','assistant-a':'Assistant A','assistant-b':'Assistant B','assistant-c':'Assistant C'}[id]||id}))};break;
+ case 'agents.list':result={defaultId:'main',agents:agentIds.map(id=>({id,name:{main:'Coordinator',builder:'Builder',reviewer:'Reviewer',researcher:'Researcher','assistant-a':'Assistant A','assistant-b':'Assistant B','assistant-c':'Assistant C'}[id]||id}))};break;
  case 'sessions.list':{
   let filtered=params.spawnedBy?[builder]:rows;
   if(params.agentId)filtered=filtered.filter(r=>r.agentId===params.agentId);
-  if(params.search)filtered=filtered.filter(r=>r.displayName.toLowerCase().includes(params.search.toLowerCase()));
+  if(params.search)filtered=filtered.filter(r=>(r.displayName||'New conversation').toLowerCase().includes(params.search.toLowerCase()));
   if(params.activeOnly)filtered=filtered.filter(r=>r.hasActiveRun);
   const offset=params.offset||0,limit=params.limit||60;
   result={sessions:filtered.slice(offset,offset+limit),totalCount:filtered.length,limitApplied:limit,hasMore:offset+limit<filtered.length,nextOffset:Math.min(offset+limit,filtered.length)};break;
@@ -45,6 +47,13 @@ switch(method){
  case 'chat.history':{
   if(params.sessionId) {console.log(JSON.stringify({error:{code:'INVALID_REQUEST',message:'sessionId requires messageId'}}));process.exit(1);}
   const row=rows.find(r=>r.key===params.sessionKey);if(!row)process.exit(3);
+  if(createdRows.includes(row)) {
+   const sent=persisted.sent.filter(item=>item.sessionKey===row.key);
+   const messages=sent.flatMap(item=>[{role:'user',content:item.message,__openclaw:{id:'sent-'+item.idempotencyKey}},{role:'assistant',content:'Fixture reply received.',__openclaw:{id:'reply-'+item.idempotencyKey}}]);
+   result={sessionKey:row.key,sessionId:row.sessionId,messages,totalMessages:messages.length,hasMore:false,
+    sessionInfo:{...row,activeLeafEntryId:sent.at(-1)?.idempotencyKey??null}};
+   break;
+  }
   const old=params.offset>0;
   result={sessionKey:row.key,sessionId:row.sessionId,totalMessages:103,hasMore:!old,nextOffset:old?103:100,
    messages:old?[{role:'user',content:'Earlier fixture message',__openclaw:{id:'old'}}]:[
@@ -62,7 +71,23 @@ switch(method){
   }
   break;
  }
- case 'progressCard.get':result={card:{sessionKey:params.sessionKey,revision:persisted.planRevision,updatedAt:1700000000000,markdown:'Fixture task plan',steps:[{step:'Inspect implementation',status:'completed'},{step:'Implement requested changes',status:'in_progress'},{step:'Verify behavior',status:'pending'}]}};break;
+ case 'progressCard.get':result={card:createdRows.some(row=>row.key===params.sessionKey)?null:{sessionKey:params.sessionKey,revision:persisted.planRevision,updatedAt:1700000000000,markdown:'Fixture task plan',steps:[{step:'Inspect implementation',status:'completed'},{step:'Implement requested changes',status:'in_progress'},{step:'Verify behavior',status:'pending'}]}};break;
+ case 'sessions.create':{
+  const {key,agentId}=params;
+  const prefix='agent:'+agentId+':dashboard:';
+  if(!stdin||!agentIds.includes(agentId)||typeof key!=='string'||!key.startsWith(prefix)||
+     !/^[a-f0-9-]{36}$/.test(key.slice(prefix.length))||Object.keys(params).some(field=>!['key','agentId'].includes(field))||
+     rows.some(row=>row.key===key)){
+   console.log(JSON.stringify({error:{code:'INVALID_REQUEST'}}));process.exit(1);
+  }
+  const sessionId='physical-'+key.slice(prefix.length);
+  const entry={sessionId,updatedAt:Date.now()};
+  persisted.conversations=createdRows;
+  createdRows.unshift({key,agentId,...entry,hasActiveRun:false,activeRunIds:[]});
+  save();
+  result={ok:true,key,sessionId,entry,runStarted:false};
+  break;
+ }
  case 'chat.send':{
   const prior=persisted.sent.find(x=>x.idempotencyKey===params.idempotencyKey);
   if(!prior){persisted.sent.push(params);persisted.planRevision++;save();}
@@ -106,7 +131,15 @@ switch(method){
   persisted.config=merge(persisted.config,JSON.parse(params.raw));persisted.configHash='changed-hash';save();result={ok:true,hash:persisted.configHash};break;
  }
  case 'sessions.describe': result={session:rows.find(r=>r.key===params.key)||null};break;
- case 'sessions.processes.list':result={sessionId:rows.find(r=>r.key===params.key)?.sessionId||'missing',processes:[{processId:'verify',instanceId:'instance-1',name:'verify.sh',status:'running',startedAt:1700000000000,tail:'Fixture output: checks running',truncated:false,canStop:false}],truncated:false};break;
+ case 'commands.list':{
+  const row=rows.find(row=>row.key===params.sessionKey&&row.agentId===params.agentId);
+  if(!row||params.scope!=='text'||params.includeArgs!==false)break;
+  const common={name:'status',description:'Show fixture status',textAliases:['/status','/st'],acceptsArgs:false,source:'native',scope:'both'};
+  result={commands:[common,...(row.agentId==='main'?[{name:'model',description:'Show a model or take a model name',textAliases:['/model','/m'],acceptsArgs:true,source:'native',scope:'both'},
+   {name:'fixture-skill',description:'Use a fixture skill',textAliases:['/fixture-skill'],acceptsArgs:true,source:'skill',skillDisplayName:'Fixture Skill',scope:'both'}]:
+   row.agentId==='builder'?[{name:'review',description:'Review fixture changes',textAliases:['/review'],acceptsArgs:true,source:'plugin',scope:'both'}]:[])]};break;
+ }
+ case 'sessions.processes.list':result={sessionId:rows.find(r=>r.key===params.key)?.sessionId||'missing',processes:createdRows.some(row=>row.key===params.key)?[]:[{processId:'verify',instanceId:'instance-1',name:'verify.sh',status:'running',startedAt:1700000000000,tail:'Fixture output: checks running',truncated:false,canStop:false}],truncated:false};break;
  case 'cron.list':result={jobs:[{id:'job-1',name:'Workspace index',enabled:true,schedule:{kind:'cron',expr:'0 8 * * *',tz:'Etc/UTC'},lastRunAtMs:1700000000000,nextRunAtMs:1700086400000,lastRunStatus:'ok'}],total:1,hasMore:false};break;
  case 'cron.runs':result={entries:[{runId:'cron-1',jobId:'job-1',jobName:'Workspace index',status:'ok',ts:1700000000000,summary:'Index updated'}],total:1,hasMore:false};break;
  default:process.exit(4);

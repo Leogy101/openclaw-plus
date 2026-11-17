@@ -33,6 +33,64 @@ function fixture({ read, write } = {}) {
 }
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
+const creation = { agentId: 'builder', requestId: 'new-fixture-chat' };
+const roster = { agents: [{ id: creation.agentId }] };
+
+test('creating an empty conversation opens the exact native receipt and coalesces the same request', async () => {
+  const ready = deferred();
+  const { actions, calls } = fixture({
+    read: () => roster,
+    async write(_method, { key }) {
+      await ready.promise;
+      return { ok: true, key, sessionId: 'new-physical', entry: { sessionId: 'new-physical' }, runStarted: false };
+    },
+  });
+  const first = actions.handle('createConversation', creation);
+  const repeated = actions.handle('createConversation', creation);
+  ready.resolve();
+  const row = await first;
+  assert.deepEqual(await repeated, row);
+  assert.deepEqual(await actions.handle('createConversation', creation), row);
+  assert.equal(row.agentId, 'builder');
+  assert.equal(row.sessionId, 'new-physical');
+  assert.equal(row.title, 'New conversation');
+  assert.match(row.key, /^agent:builder:dashboard:[a-f0-9-]{36}$/);
+  assert.deepEqual(calls.map(call => [call.method, call.params]), [
+    ['agents.list', {}], ['sessions.create', { key: row.key, agentId: 'builder' }],
+  ]);
+  await assert.rejects(actions.handle('createConversation', { ...creation, agentId: 'main' }), { code: 'INVALID' });
+});
+
+test('conversation creation rejects caller session keys, initial turns and unavailable agents before any write', async () => {
+  const { actions, calls } = fixture({ read: () => ({ agents: [] }) });
+  for (const extra of [{ key: selected.key }, { message: 'Fixture work' }, { parentSessionKey: selected.key }, { agentId: 'builder:main' }]) {
+    await assert.rejects(actions.handle('createConversation', { ...creation, ...extra }), { code: 'INVALID' });
+  }
+  assert.equal(calls.length, 0);
+  await assert.rejects(actions.handle('createConversation', creation), { code: 'ACCESS', preflight: true });
+  assert.equal(calls.some(call => call.kind === 'write'), false);
+});
+
+test('checking unconfirmed creation only reads the generated key even if the session is initially missing', async () => {
+  let committed, visible = false;
+  const { actions, calls } = fixture({
+    read(method) { return method === 'agents.list' ? roster : { session: visible ? committed : null }; },
+    write(_method, params) {
+      committed = { ...params, sessionId: 'new-physical', displayName: 'Native title' };
+      throw new ReadError('UNCERTAIN', 'Fixture lost receipt.');
+    },
+  });
+  await assert.rejects(actions.handle('createConversation', creation), { code: 'UNCERTAIN', uncertain: true });
+  await assert.rejects(actions.handle('createConversation', creation), { code: 'UNCERTAIN', uncertain: true });
+  visible = true;
+  const row = await actions.handle('createConversation', creation);
+  assert.equal(row.sessionId, committed.sessionId);
+  assert.equal(row.title, committed.displayName);
+  assert.deepEqual(calls.filter(call => call.kind === 'write').map(call => call.method), ['sessions.create']);
+  assert.deepEqual(calls.filter(call => call.method === 'sessions.describe').map(call => call.params),
+    [1, 2].map(() => ({ key: committed.key, agentId: committed.agentId })));
+});
+
 test('definitive preflight and gateway rejections do not exhaust send admission', async () => {
   for (const rejection of ['preflight','gateway']) {
     let rejecting=true;

@@ -27,7 +27,8 @@ export function normalizeRunStatus(history,{context,observedAt}={}) {
     if(run!=null)return {...result,detail:'A retained response conflicts with current idle telemetry.'};
     return {...result,state:'idle',detail:'No active direct response is reported.'};
   }
-  if(run==null)return {...result,state:'active',detail:'OpenClaw reports an active response; run details are unavailable.'};
+  if(run==null)return {...result,state:'active',...(exactPresent&&exact.length===1?{runId:exact[0]}:{}),
+    detail:'OpenClaw reports an active response; run details are unavailable.'};
   if(!object(run)||!id(run.runId)||exactPresent&&!exact.includes(run.runId))return {...result,detail:'The visible response is not confirmed by current run identity.'};
   if(run.sessionId!==undefined&&run.sessionId!==context.sessionId||run.sessionKey!==undefined&&run.sessionKey!==context.key||
       run.agentId!==undefined&&run.agentId!==context.agentId)return result;
@@ -73,4 +74,24 @@ export function viewRunStatus(status,now,connected=true) {
   const elapsedMs=timestamp(status.startedAt)&&timestamp(end)&&status.startedAt<=end?end-status.startedAt:undefined;
   return {...status,stale,active,...(elapsedMs!==undefined?{elapsedMs}:{}),
     ...(stale?{lastKnownState:status.state,state:'unknown',detail:connected?'Response status is stale; the last observation is unverified.':'Disconnected; showing the last observed response.'}:{})};
+}
+
+// An exact cancellation target is separate from engineering activity or progress.
+// A locally owned started receipt bridges only the short gap before fresh telemetry.
+export function stoppableRunId({context,status,submission,now,connected=true}={}) {
+  if(!timestamp(now))throw new TypeError('An explicit presentation clock is required.');
+  const fields=['key','agentId','sessionId'];
+  if(!connected||!fields.every(key=>id(context?.[key])))return null;
+  const sameContext=value=>object(value)&&fields.every(key=>value[key]===context[key]);
+  const observed=object(status)&&sameContext(status.context)&&timestamp(status.observedAt)?status:null;
+  const current=observed?viewRunStatus(observed,now,connected):null;
+  // An explicitly stale snapshot cannot revive a receipt after telemetry loss.
+  if(observed?.stale===true||current?.stale)return null;
+  const local=object(submission)&&sameContext(submission.selected)&&submission.status==='accepted'&&
+    submission.stopReceiptSuperseded!==true&&
+    timestamp(submission.acceptedAt)&&submission.acceptedAt<=now&&now-submission.acceptedAt<=RUN_FRESH_MS&&
+    ['started','in_flight'].includes(submission.receipt?.status)&&id(submission.receipt?.runId);
+  if(local&&(!observed||submission.acceptedAt>observed.observedAt))return submission.receipt.runId;
+  if(!observed||observed.stale===true||observed.active===false||!id(observed.runId))return null;
+  return current.active?observed.runId:null;
 }

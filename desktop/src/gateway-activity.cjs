@@ -271,6 +271,7 @@ class ActivityService {
     if (data.history?.inFlightRun && !selectedRunCurrent && runStatus.state === 'active') {
       // The final row can prove aggregate activity without proving the sampled
       // owner. Preserve that distinction instead of reviving rejected details.
+      delete runStatus.runId;
       runStatus.detail = 'OpenClaw reports an active response; sampled run details could not be confirmed for the current session.';
     }
     return {

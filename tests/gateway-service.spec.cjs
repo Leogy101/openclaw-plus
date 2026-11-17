@@ -115,6 +115,79 @@ test('history verifies the exact returned session incarnation, including missing
   assert.equal((await service.history(selected)).sessionId,'coordinator-1');
 });
 
+test('slash command discovery reads the exact authorized conversation and projects only bounded text choices',async()=>{
+  const {service,calls} = fixture(method=>method==='sessions.describe'?{session:{...selected,lifecycleRevision:'fixture-revision'}}:{
+    commands:[
+      {name:'model',textAliases:['/model','/m','/m','/invalid word'],description:'Choose a\nmodel',acceptsArgs:true,source:'native',scope:'both'},
+      {name:'fixture-skill',description:'Fixture description',source:'skill',skillDisplayName:'Fixture Skill',configuration:'not exposed'},
+      {name:'model',description:'Do not replace the first choice'},
+      {name:'native-only',scope:'native'},
+      {name:'invalid/name',textAliases:['/invented']},null,
+    ],
+  });
+  assert.deepEqual(await service.slashCommandCatalog(selected),{commands:[
+    {name:'model',description:'Choose a model',aliases:['m'],acceptsArgs:true,kind:'native'},
+    {name:'fixture-skill',description:'Fixture description',aliases:[],acceptsArgs:false,kind:'skill',label:'Fixture Skill'},
+  ]});
+  assert.deepEqual(calls,[
+    {method:'sessions.describe',params:{key:selected.key,agentId:selected.agentId}},
+    {method:'commands.list',params:{sessionKey:selected.key,agentId:selected.agentId,scope:'text',includeArgs:false}},
+    {method:'sessions.describe',params:{key:selected.key,agentId:selected.agentId}},
+  ]);
+});
+
+test('slash command discovery rejects a missing identity and results read across replacement',async()=>{
+  const missing = fixture(()=>{throw new Error('must not query gateway');});
+  await assert.rejects(missing.service.slashCommandCatalog({...selected,sessionId:undefined}),{code:'INVALID'});
+  await assert.rejects(missing.service.slashCommandCatalog({...selected,scope:'both'}),{code:'INVALID'});
+  assert.equal(missing.calls.length,0);
+
+  const wrongOwner = fixture(()=>({session:{...selected,agentId:'other-agent'}}));
+  await assert.rejects(wrongOwner.service.slashCommandCatalog(selected),{code:'SESSION_CHANGED'});
+  assert.deepEqual(wrongOwner.calls.map(call=>call.method),['sessions.describe']);
+
+  for (const changed of [{sessionId:'replacement'},{lifecycleRevision:'next-revision'}]) {
+    let reads = 0;
+    const row = {...selected,lifecycleRevision:'fixture-revision'};
+    const changedOwner = fixture(method=>method==='sessions.describe'?
+      {session:++reads===1?row:{...row,...changed}}:{commands:[{name:'status'}]});
+    await assert.rejects(changedOwner.service.slashCommandCatalog(selected),{code:'SESSION_CHANGED'});
+    assert.equal(reads,2);
+  }
+});
+
+test('history projects known context counts and validates the last prompt budget',async()=>{
+  const contextBudgetStatus = {schemaVersion:1,source:'pre-prompt-estimate',sessionId:selected.sessionId,
+    provider:'Fixture',model:'fixture-model',contextTokenBudget:32000,promptBudgetBeforeReserve:28000};
+  const row = {...selected,totalTokens:0,totalTokensFresh:true,contextTokens:32000,modelProvider:'fixture',
+    model:'fixture-model',contextBudgetStatus};
+  const history = {sessionKey:selected.key,sessionId:selected.sessionId,sessionInfo:row,messages:[]};
+  const {service,calls} = fixture(()=>history);
+  assert.deepEqual((await service.history(selected)).contextUsage,
+    {usedTokens:0,capacityTokens:28000,budget:'prompt',fresh:true,modelRef:'fixture/fixture-model'});
+  assert.deepEqual(calls.map(call=>call.method),['chat.history']);
+
+  for (const change of [{sessionId:'unrelated'},{provider:'another-provider'},
+      {model:'another-model'},{contextTokenBudget:35000},{promptBudgetBeforeReserve:33000}]) {
+    const sessionInfo = {...row,totalTokens:33000,totalTokensFresh:false,contextBudgetStatus:{...contextBudgetStatus,...change}};
+    const {service} = fixture(()=>({...history,sessionInfo}));
+    assert.deepEqual((await service.history(selected)).contextUsage,
+      {usedTokens:33000,capacityTokens:32000,budget:'window',fresh:false,modelRef:'fixture/fixture-model'});
+  }
+});
+
+test('history excludes context counts with unusable values or a different session owner',async()=>{
+  const row = {...selected,totalTokens:18650,contextTokens:32000};
+  const history = {sessionKey:selected.key,sessionId:selected.sessionId,sessionInfo:row,messages:[]};
+  for (const change of [{totalTokens:undefined},{totalTokens:-1},{totalTokens:'42'},{contextTokens:0},{contextTokens:1.5},
+      {sessionId:'unrelated'},{agentId:'another-agent'},{key:'agent:another-agent:main'}]) {
+    const {service} = fixture(()=>({...history,sessionInfo:{...row,...change}}));
+    assert.equal((await service.history(selected)).contextUsage,undefined);
+  }
+  const {service} = fixture(()=>({...history,sessionKey:'agent:another-agent:main'}));
+  assert.equal((await service.history(selected)).contextUsage,undefined);
+});
+
 test('work rejects a changed or missing process owner rather than exposing another incarnation',async()=>{
   for(const sessionId of ['coordinator-2',undefined]) {
     const {service}=fixture(method=>method==='sessions.processes.list'?{sessionId,processes:[{processId:'wrong'}]}:{sessions:[]});

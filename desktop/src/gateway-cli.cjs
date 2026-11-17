@@ -4,10 +4,10 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 // Fixed read and write lanes; the renderer never supplies a method or executable.
-const READ_METHODS = new Set(['agents.list', 'sessions.list', 'sessions.describe', 'chat.history',
+const READ_METHODS = new Set(['agents.list', 'sessions.list', 'sessions.describe', 'chat.history', 'commands.list',
   'sessions.processes.list', 'cron.list', 'cron.runs', 'progressCard.get',
   'exec.approval.list','plugin.approval.list','openclaw.approval.list','approval.get','config.get','audit.activity.list','models.list','tts.status','gcb.profile.preflight']);
-const WRITE_METHODS = new Set(['chat.send','chat.abort','approval.resolve','config.patch','sessions.patch','tts.speak']);
+const WRITE_METHODS = new Set(['chat.send','chat.abort','approval.resolve','config.patch','sessions.patch','sessions.create','tts.speak']);
 const APPROVAL_METHODS = new Set(['exec.approval.list','plugin.approval.list','openclaw.approval.list','approval.get','approval.resolve']);
 const DEFAULT_NODE = '/opt/homebrew/bin/node';
 const DEFAULT_CLI = '/opt/homebrew/lib/node_modules/openclaw/openclaw.mjs';
@@ -30,7 +30,7 @@ function localTarget(home) {
   return { url: `ws://127.0.0.1:${port}`, originalUrl: `http://127.0.0.1:${port}/`, configPath, controlUiBasePath: gateway.controlUi?.basePath || '' };
 }
 
-function classifyFailure(output, timedOut, write = false, checked = false) {
+function classifyFailure(output, timedOut, write = false, checked = false, method) {
   let data;
   try { data = JSON.parse(output); } catch { /* Raw CLI errors are never exposed or logged. */ }
   const rawCode = String(data?.error?.code ?? data?.code ?? '').toUpperCase();
@@ -42,6 +42,9 @@ function classifyFailure(output, timedOut, write = false, checked = false) {
     error.preflight=true;return error;
   }
   if (write) {
+    if (method==='sessions.create' && ['UNKNOWN_METHOD','UNSUPPORTED'].includes(rawCode)) {
+      return new ReadError('UNSUPPORTED','This OpenClaw gateway does not support starting a conversation from this app. Try New Session in original OpenClaw.');
+    }
     if (/AUTH|PAIR|SCOPE|FORBIDDEN|ACCESS|UNAUTHORIZED/.test(rawCode+detail)) return new ReadError('ACCESS','OpenClaw did not authorize this action. Your existing permissions still apply.');
     if (/ACTIVE.LEAF.CHANGED|SESSION.SETTINGS.CHANGED|CONFLICT|STALE/.test(rawCode+detail)) return new ReadError('CONFLICT','This session or configuration changed. Refresh and review before trying again.');
     if (/INVALID_REQUEST|UNKNOWN_METHOD|NOT_FOUND|UNSUPPORTED/.test(rawCode+detail)) return new ReadError('INVALID','OpenClaw rejected this action. Refresh the current session or settings and review your input.');
@@ -98,7 +101,7 @@ class CliTransport {
   }
   enqueue(method, params, write, modelOperation, checked = false) {
     if (!(write ? WRITE_METHODS : READ_METHODS).has(method)) return Promise.reject(new ReadError('DENIED', 'This operation is not allowed on the selected request lane.'));
-    const stdin = write && ['chat.send','sessions.patch','config.patch','tts.speak'].includes(method);
+    const stdin = write && ['chat.send','sessions.patch','sessions.create','config.patch','tts.speak'].includes(method);
     const media = method === 'chat.send' && Array.isArray(params?.attachments) && params.attachments.length > 0;
     if (!params || typeof params !== 'object' || Array.isArray(params) || Buffer.byteLength(JSON.stringify(params)) > (write && media ? 18 * 1024 * 1024 : write ? 131072 : 32768)) {
       return Promise.reject(new ReadError('INVALID', 'Invalid read parameters.'));
@@ -131,13 +134,13 @@ class CliTransport {
         timeout: job.method==='tts.speak' ? 140000 : job.checked ? 38000 : job.write ? 28000 : 18000, maxBuffer: (job.method==='tts.speak' ? 17 : 4) * 1024 * 1024, windowsHide: true }, (error, stdout) => {
         this.children.delete(child); this.active--;
         if (this.closed) job.reject(job.write ? classifyFailure('',false,true) : new ReadError('CLOSED', 'The connection is closed.'));
-        else if (error) job.reject(classifyFailure(stdout, error.killed || error.code === 'ETIMEDOUT', job.write, job.checked));
+        else if (error) job.reject(classifyFailure(stdout, error.killed || error.code === 'ETIMEDOUT', job.write, job.checked, job.method));
         else {
           try {
             const result = JSON.parse(stdout);
             if (!result || typeof result !== 'object' || result.ok === false && result.error) throw new Error('Invalid reply');
             job.resolve(result);
-          } catch { job.reject(classifyFailure(stdout, false, job.write, job.checked)); }
+          } catch { job.reject(classifyFailure(stdout, false, job.write, job.checked, job.method)); }
         }
         this.drain();
       });

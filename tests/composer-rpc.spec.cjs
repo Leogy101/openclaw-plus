@@ -9,6 +9,31 @@ const url='ws://127.0.0.1:19999';
 const params={sessionKey:'agent:main:fixture',agentId:'main',sessionId:'physical-fixture',message:'Fixture prompt',idempotencyKey:'fixture-send',expectedLeafEntryId:null,replyToId:'fixture-question'};
 const session={sessionId:params.sessionId,agentId:params.agentId};
 
+test('session creation uses a closed write contract for an explicit fresh agent key', async () => {
+ const create = {key:'agent:builder:dashboard:4e43f949-ae80-419a-9a36-62c88984c8e1',agentId:'builder'};
+ const calls=[];
+ const load=async()=>async(method,options,input,policy)=>{calls.push({method,options,input,policy});return {ok:true};};
+ for(const bad of [{agentId:'builder'}, {...create,key:'agent:builder:main'}, {...create,agentId:'main'},
+     {...create,message:'unexpected turn'}, {...create,parentSessionKey:'agent:builder:main'}]){
+  await assert.rejects(executeRequest('sessions.create',url,bad,load),{code:'INVALID_REQUEST'});
+ }
+ assert.deepEqual(calls,[]);
+ await executeRequest('sessions.create',url,create,load);
+ assert.deepEqual(calls,[{method:'sessions.create',options:{expectUrl:url,json:true,timeout:'20000'},input:create,
+  policy:{scopes:['operator.write'],sharedStateMode:'read-only',progress:false}}]);
+});
+
+test('unadvertised native creation fails with supported fallback guidance', async () => {
+ const input = {key:'agent:builder:dashboard:4e43f949-ae80-419a-9a36-62c88984c8e1',agentId:'builder'};
+ const load=async()=>async()=>{throw Object.assign(new Error('unknown method: sessions.create'),{gatewayCode:'INVALID_REQUEST'});};
+ await assert.rejects(executeRequest('sessions.create',url,input,load),error=>{
+  const displayError=classifyFailure(JSON.stringify(failurePayload(error)),false,true,false,'sessions.create');
+  assert.equal(displayError.code,'UNSUPPORTED');
+  assert.match(displayError.message,/original OpenClaw/);
+  return true;
+ });
+});
+
 test('checked helper loads the supported SDK once, checks exact session then sends unchanged params with narrow scopes',async()=>{
  const calls=[];let loads=0;
  const result=await executeRequest('chat.send.checked',url,params,async()=>{loads++;return async(method,options,input,policy)=>{

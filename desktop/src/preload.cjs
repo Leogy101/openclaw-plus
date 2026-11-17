@@ -59,7 +59,7 @@ contextBridge.exposeInMainWorld('openclawPlusDesktop', Object.freeze({
     if (!result?.ok) throw new Error(result?.message || 'Finder could not reveal this item.');
   },
   async gateway(operation, params = {}) {
-    if (!['overview','history','work','automations','reconnect','original','plan','send','abort','approvals','resolveApproval','settings','saveSettings','activity','composerOptions','setComposer','speechOptions','speak','permissionOptions','setPermissions'].includes(operation)) {
+    if (!['overview','history','work','automations','reconnect','original','plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','activity','composerOptions','setComposer','slashCommandCatalog','speechOptions','speak','permissionOptions','setPermissions'].includes(operation)) {
       return {ok:false,error:{code:'INVALID',message:'Unsupported workspace operation.'}};
     }
     // Structured errors preserve machine-readable state across Electron's isolated bridge.

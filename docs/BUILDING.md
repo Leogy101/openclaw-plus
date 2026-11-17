@@ -65,17 +65,17 @@ npm run test:prototype
 npm run package --prefix desktop
 ```
 
-For version **0.8.0-preview.1**, the output is:
+For version **0.8.0-preview.6**, the output is:
 
 ```text
-releases/0.8.0-preview.1/OpenClaw+-darwin-arm64/OpenClaw+.app
+releases/0.8.0-preview.6/OpenClaw+-darwin-arm64/OpenClaw+.app
 ```
 
 Open the application in Finder to launch the local build. Packaging does not install it. Repeating the command replaces the generated output for that version.
 
 The packager includes runtime license notices, enables Electron security fuses and verifies an **ad-hoc signature**. It does not provide Developer ID signing or Apple notarization. There is no public installer or automatic update service. Packaging produces a local application directory; preparing a distributable ZIP, checksum and release entry is a separate review step. Build results are not claimed to be byte-identical across macOS or toolchain versions.
 
-If a future reviewed release supplies `OpenClawPlus-0.8.0-preview.1-macos-arm64.zip` and `SHA256SUMS.txt`, check the ZIP against that checksum manifest, extract it with Finder and move the contained **OpenClaw+.app** to your Applications folder. Check that release's compatibility and signing status before opening. Downloaded ad-hoc builds may be blocked by macOS. These instructions do not imply that a published artifact currently exists.
+When a release supplies a macOS ZIP and `SHA256SUMS.txt`, check the ZIP against that checksum manifest, extract it with Finder and move the contained **OpenClaw+.app** to your Applications folder. Check that release's compatibility and signing status before opening. macOS may block downloaded ad-hoc builds.
 
 The supplied artwork stays in `desktop/assets/openclaw-plus-logo.png`. `npm run build:icons --prefix desktop` regenerates its macOS icon using Apple's image tools without changing that source image.
 

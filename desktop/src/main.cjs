@@ -21,7 +21,7 @@ const { GcbService, PROFILE_OPERATIONS } = require('./gcb-service.cjs');
 const { authorizeProfileTarget, authorizeLocalProfileTarget } = require('./gcb-native.cjs');
 const { nativeSetupUrl } = require('./model-rpc.cjs');
 const { readProjectObservation } = require('./project-observation.cjs');
-const INTERACTIVE = new Set(['plan','send','abort','approvals','resolveApproval','settings','saveSettings','composerOptions','setComposer']);
+const INTERACTIVE = new Set(['plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','composerOptions','setComposer']);
 const MUTATIONS = new Set(['send','abort','resolveApproval','saveSettings','setComposer']);
 
 const NAME = 'OpenClaw+';
@@ -223,7 +223,7 @@ function createMenu() {
       { type: 'separator' }, { role: 'services' }, { type: 'separator' },
       { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
     ] },
-    { label: 'File', submenu: [{label:'Choose an agent conversation to message', enabled:false},
+    { label: 'File', submenu: [item('new', 'New Conversation…', 'Command+N'),
       item('quick-open', 'Quick Open…', 'Command+K'), { type: 'separator' }, { role: 'close' }] },
     { role: 'editMenu' },
     { label: 'View', submenu: [
@@ -465,13 +465,17 @@ else {
           const service=getGateway();
           if (actions?.gateway!==service) {
             const conversation = new ConversationActions(service,{attachments});
-            if (actions?.conversation) conversation.submissions = actions.conversation.submissions;
+            if (actions?.conversation) {
+              conversation.submissions = actions.conversation.submissions;
+              conversation.creations = actions.conversation.creations;
+            }
             actions={gateway:service,conversation,interaction:new InteractionService(service)};
             actions.composer = new ComposerActions(service,{isBusy:context=>actions.interaction.writing || actions.conversation.hasPendingFor(context) || permissions?.writing===true});
           }
-          const handler=['plan','send','abort'].includes(operation)?actions.conversation:['composerOptions','setComposer'].includes(operation)?actions.composer:actions.interaction;
+          const handler=['plan','send','abort','createConversation'].includes(operation)?actions.conversation:['composerOptions','setComposer'].includes(operation)?actions.composer:actions.interaction;
           const data=await handler.handle(operation,params);
           if (MUTATIONS.has(operation)) { service.invalidate(); publish({kind:'sessions'}); publish({kind:'approvals'}); }
+          if (operation==='createConversation') { service.invalidate(); publish({kind:'sessions'}); }
           return {ok:true,data};
         }
         validate(operation,params);
@@ -490,7 +494,7 @@ else {
       } catch(error) {
         return {ok:false,error:{code:error instanceof ReadError?error.code:'UNAVAILABLE',
           message:error instanceof ReadError?error.message:'The request could not be completed. Refresh the view before trying again.',uncertain:error?.uncertain===true,
-          notSent:operation==='send'&&error instanceof ReadError&&error.preflight===true&&error.code!=='UNCERTAIN'}};
+          notSent:['send','createConversation'].includes(operation)&&error instanceof ReadError&&error.preflight===true&&error.code!=='UNCERTAIN'}};
       }
     });
     createMenu();

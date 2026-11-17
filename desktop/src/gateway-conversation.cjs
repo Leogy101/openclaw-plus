@@ -1,13 +1,14 @@
 'use strict';
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { ReadError } = require('./gateway-cli.cjs');
+const { sessionRow } = require('./gateway-service.cjs');
 const { assertSession: checkSession } = require('./composer-rpc.cjs');
 function assertSession(row,input,sending=false) {
   try { return checkSession(row,input,sending); }
   catch(error) { throw new ReadError(error.code,error.message); }
 }
 
-const OPERATIONS = new Set(['plan', 'send', 'abort']);
+const OPERATIONS = new Set(['plan', 'send', 'abort', 'createConversation']);
 const MAX_REQUESTS = 128;
 const own = (value, key) => Object.hasOwn(value, key);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -19,6 +20,14 @@ function identifier(value, max = 1024) {
 function validate(operation, input) {
   const extra = { plan: [], send: ['message', 'requestId', 'expectedLeafEntryId', 'attachmentIds', 'replyToId'], abort: ['runId'] };
   if (!OPERATIONS.has(operation) || !object(input)) fail('INVALID', 'Invalid conversation action.');
+  if (operation === 'createConversation') {
+    if (Object.keys(input).some(key => !['agentId','requestId'].includes(key)) ||
+        typeof input.agentId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(input.agentId) ||
+        typeof input.requestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.requestId)) {
+      fail('INVALID', 'Choose an agent before starting a conversation.');
+    }
+    return { agentId: input.agentId, requestId: input.requestId };
+  }
   const fields = ['key', 'agentId', 'sessionId', ...extra[operation]];
   if (Object.keys(input).some(key => !fields.includes(key)) ||
       ['key', 'agentId', 'sessionId'].some(key => !identifier(input[key]))) {
@@ -132,6 +141,7 @@ class ConversationActions {
     this.attachments = attachments;
     // Submission receipts are transport bookkeeping, never a task/progress authority.
     this.submissions = new Map();
+    this.creations = new Map();
   }
   hasPendingFor(input) {
     const context = JSON.stringify([input.key,input.agentId,input.sessionId]);
@@ -141,6 +151,7 @@ class ConversationActions {
     const input = validate(operation, params);
     if (operation === 'send') return this.send(input);
     if (operation === 'abort') return this.abort(input);
+    if (operation === 'createConversation') return this.createConversation(input);
     return this.plan(input);
   }
   readFresh(method, params, foreground = false) {
@@ -154,6 +165,89 @@ class ConversationActions {
     const result = await this.readFresh('sessions.describe', { key: input.key, agentId: input.agentId }, foreground);
     this.base.assertCurrent(generation);
     return assertSession(result?.session,input);
+  }
+  async createConversation({ agentId, requestId }) {
+    const target = this.base.transport.target;
+    const connection = JSON.stringify([target?.url, target?.configPath]);
+    let record = this.creations.get(requestId);
+    if (record && (record.agentId !== agentId || record.connection !== connection)) {
+      fail('INVALID', 'This request belongs to a different agent or connection.');
+    }
+    if (record?.pending) return record.pending;
+    if (record?.result) return { ...record.result };
+    if (!record) {
+      if (this.creations.size >= MAX_REQUESTS) {
+        const settled = [...this.creations].find(([, value]) => value.result && !value.pending);
+        if (!settled) fail('BUSY', 'Too many conversation requests await confirmation.');
+        this.creations.delete(settled[0]);
+      }
+      // An omitted or reusable key can select an existing session. Generate the
+      // key in the main process and issue at most one uncertain write for it.
+      record = { key: `agent:${agentId}:dashboard:${randomUUID()}`, agentId, connection };
+      this.creations.set(requestId, record);
+    }
+    const pending = this.createOrFindConversation(record);
+    record.pending = pending;
+    try { return await pending; }
+    catch (error) {
+      if (!record.uncertain) this.creations.delete(requestId);
+      throw error;
+    } finally { record.pending = undefined; }
+  }
+  async createOrFindConversation(record) {
+    const { key, agentId } = record;
+    const generation = this.base.generation;
+    if (!record.uncertain) {
+      try {
+        const roster = await this.readFresh('agents.list', {}, true);
+        this.base.assertCurrent(generation);
+        if (!Array.isArray(roster?.agents) || !roster.agents.some(agent => agent?.id === agentId)) {
+          fail('ACCESS', 'This agent is unavailable. Refresh the agent list and choose again.');
+        }
+      } catch (error) {
+        const failure = error instanceof ReadError
+          ? new ReadError(error.code, error.message)
+          : new ReadError('UNAVAILABLE', 'The current agent list could not be verified.');
+        failure.preflight = true;
+        throw failure;
+      }
+    }
+    try {
+      let row;
+      if (record.uncertain) {
+        // A missing or hidden row does not prove the original write failed.
+        // Check the exact generated key without attempting creation again.
+        const result = await this.readFresh('sessions.describe', { key, agentId }, true);
+        row = result?.session;
+      } else {
+        const result = await this.base.transport.write('sessions.create', { key, agentId });
+        if (result?.ok === true && result.key === key && result.runStarted === false &&
+            object(result.entry) && result.entry.sessionId === result.sessionId &&
+            (result.entry.key === undefined || result.entry.key === key) &&
+            (result.agentId === undefined || result.agentId === agentId) &&
+            (result.entry?.agentId === undefined || result.entry.agentId === agentId)) {
+          row = { ...result.entry, key, agentId };
+        }
+      }
+      this.base.assertCurrent(generation);
+      if (!row || row.key !== key || row.agentId !== agentId || row.archived === true ||
+          !identifier(row.sessionId) || row.sessionId.trim() !== row.sessionId) {
+        fail('UNCERTAIN', 'OpenClaw did not return a matching new conversation.');
+      }
+      record.result = sessionRow(row);
+      record.uncertain = false;
+      return { ...record.result };
+    } catch (error) {
+      if (!record.uncertain) {
+        if (error.code === 'INVALID') fail('INVALID', 'OpenClaw could not create this conversation. Try New Session in original OpenClaw.');
+        if (['BUSY','CLOSED'].includes(error.code)) error.preflight = true;
+        if (['ACCESS','DENIED','CONFLICT','BUSY','CLOSED','UNSUPPORTED'].includes(error.code)) throw error;
+      }
+      record.uncertain = true;
+      const unknown = new ReadError('UNCERTAIN', 'OpenClaw did not confirm the new conversation. Use Check again to look for it.');
+      unknown.uncertain = true;
+      throw unknown;
+    }
   }
   async plan(input) {
     const generation = this.base.generation;
