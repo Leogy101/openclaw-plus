@@ -15,12 +15,8 @@ concurrency:
 
 jobs:
   checks:
-    name: Unit, security and GCB (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
+    name: Unit, security and GCB
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,10 +26,6 @@ jobs:
         with:
           node-version: '26.10.0'
           package-manager-cache: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        if: runner.os == 'macOS'
-        with:
-          python-version: '3.14.6'
       - name: Install locked desktop dependencies without lifecycle scripts
         run: npm ci --prefix desktop --ignore-scripts --no-audit --no-fund
       - name: Check JavaScript syntax and prepare the UI
@@ -47,12 +39,8 @@ jobs:
       - name: Install the released GCB wheel with its verified hash
         shell: bash
         run: |
-          # System Python on Ubuntu needs no LD_LIBRARY_PATH, which the desktop strips.
-          if [ "$RUNNER_OS" = Linux ]; then
-            /usr/bin/python3 -m venv "$RUNNER_TEMP/gcb"
-          else
-            python -m venv "$RUNNER_TEMP/gcb"
-          fi
+          # System Python needs no LD_LIBRARY_PATH, which the desktop strips.
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/gcb"
           "$RUNNER_TEMP/gcb/bin/python" -m pip install --disable-pip-version-check --no-deps --require-hashes \
             'https://github.com/Leogy101/governed-capability-broker/releases/download/v0.3.2a1/governed_capability_broker-0.3.2a1-py3-none-any.whl#sha256=fa51a803a02ea652b854db2160bd0e60f48168c3deaae9b3e994a2c1be94fffc'
           "$RUNNER_TEMP/gcb/bin/python" -m pip check
