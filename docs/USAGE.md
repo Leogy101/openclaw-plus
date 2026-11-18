@@ -20,6 +20,14 @@ Use **Load earlier messages** to inspect older history. Question detection cover
 
 **Activity** shows returned active sessions. **Automations** shows existing schedules and execution history. Missing, stale or ambiguous telemetry remains unverified. A response timer or token count describes an observed response, not proof that engineering work was completed.
 
+## The Office
+
+Open **The Office** in the sidebar or press **⌘8**. Tom and The Boss have private rooms. Spike, Athena and Goose share the open floor. Agents with observed active turns work at their desks. When no active turn is observed for an agent, their character takes a coffee or water break.
+
+The fixed cast follows OpenClaw agent IDs `main` (Tom), `spike`, `athena` and `goose`. A character whose ID is absent shows **Activity unknown**.
+
+Recorded delegations and handoffs prompt visits between agents in the scene. Tom visits The Boss when OpenClaw records a successful final reply to you in a direct conversation. The activity strip and roster describe the current observation. An agent with unknown activity stays at their desk between recorded visits. The view uses recent session metadata, and the original conversation contains the reply text.
+
 ## Voice and read-aloud
 
 Choose **Read aloud** beside an assistant report to use OpenClaw's configured speech provider. The same control stops playback. Reports play in chunks; fenced code, hidden reasoning and tool output are excluded. Stopping prevents later chunks and discards late audio, but cannot undo a speech request already sent to the provider.

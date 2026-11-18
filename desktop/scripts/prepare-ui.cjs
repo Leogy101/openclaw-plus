@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 fs.mkdirSync(path.join(root,'renderer'), {recursive:true});
-for(const name of ['index.html','app.css','app.js','models.css','models-view.mjs','profile-view.mjs','content.mjs','terminal-view.mjs','read-aloud.mjs','voice-view.mjs','voice-capture-worklet.js']) {
+for(const name of ['index.html','app.css','app.js','models.css','models-view.mjs','profile-view.mjs','office.css','office-view.mjs','office-scene.mjs','content.mjs','terminal-view.mjs','read-aloud.mjs','voice-view.mjs','voice-capture-worklet.js']) {
   fs.copyFileSync(path.join(root,'ui',name), path.join(root,'renderer',name));
 }
 const vendor = path.join(root, 'renderer', 'vendor');

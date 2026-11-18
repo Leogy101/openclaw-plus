@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const { ReadError } = require('./gateway-cli.cjs');
+const { readOffice } = require('./office-observation.cjs');
 const text = (value, max = 2000) => typeof value === 'string' ? value.slice(0, max) : '';
 const finite = value => Number.isFinite(value) ? value : undefined;
 const array = value => Array.isArray(value) ? value : [];
@@ -38,7 +39,7 @@ function validate(operation, input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ReadError('INVALID', 'Invalid view request.');
   const operations = { overview: ['query','offset','agentId','activeOnly'], history: ['key','agentId','sessionId','offset','foreground'],
     slashCommandCatalog: ['key','agentId','sessionId'],
-    work: ['key','agentId','sessionId'], automations: ['offset'], reconnect: [], original: [] };
+    work: ['key','agentId','sessionId'], office: [], automations: ['offset'], reconnect: [], original: [] };
   const fields = typeof operation === 'string' && Object.hasOwn(operations,operation) ? operations[operation] : undefined;
   if (!fields || Object.keys(input).some(key => !fields.includes(key))) throw new ReadError('INVALID', 'Unsupported view request.');
   for (const [key, value] of Object.entries(input)) {
@@ -183,6 +184,10 @@ class GatewayService {
       installedVersion:transport.version, message:'Connecting through the local OpenClaw CLI…' };
   }
   snapshot() { return { ...this.connection }; }
+  office(input) {
+    validate('office', input);
+    return readOffice(this, normalizeNativeMessage);
+  }
   assertCurrent(generation) {
     if (generation !== this.generation) throw new ReadError('STALE', 'The connection changed. Refresh this view.');
   }

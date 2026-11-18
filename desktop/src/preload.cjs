@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const allowed = new Set([
   'new', 'quick-open', 'toggle-navigation', 'toggle-work', 'toggle-terminal', 'settings', 'demo',
   'theme:light', 'theme:dark', 'view:Conversations', 'view:Agents',
-  'view:Projects', 'view:Activity', 'view:Automations', 'view:Approvals', 'view:Models',
+  'view:Projects', 'view:Activity', 'view:Automations', 'view:Approvals', 'view:Models', 'view:Office',
 ]);
 const initialTheme = process.argv.includes('--openclaw-plus-theme=light') ? 'light' : 'dark';
 
@@ -59,7 +59,7 @@ contextBridge.exposeInMainWorld('openclawPlusDesktop', Object.freeze({
     if (!result?.ok) throw new Error(result?.message || 'Finder could not reveal this item.');
   },
   async gateway(operation, params = {}) {
-    if (!['overview','history','work','automations','reconnect','original','plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','activity','composerOptions','setComposer','slashCommandCatalog','speechOptions','speak','permissionOptions','setPermissions'].includes(operation)) {
+    if (!['overview','history','work','office','automations','reconnect','original','plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','activity','composerOptions','setComposer','slashCommandCatalog','speechOptions','speak','permissionOptions','setPermissions'].includes(operation)) {
       return {ok:false,error:{code:'INVALID',message:'Unsupported workspace operation.'}};
     }
     // Structured errors preserve machine-readable state across Electron's isolated bridge.

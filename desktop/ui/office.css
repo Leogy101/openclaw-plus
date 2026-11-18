@@ -1,0 +1,23 @@
+/* The scene is an original low-resolution drawing; the surrounding UI stays native. */
+.office-page{min-width:0;max-width:1280px;margin:0 auto;container-type:inline-size}
+.office-heading{display:flex;justify-content:flex-end;margin-bottom:22px}
+.office-connection{display:inline-flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid var(--line);border-radius:20px;color:var(--muted);font-size:10px;white-space:nowrap;background:var(--panel)}
+.office-connection::before{content:"";width:5px;height:5px;background:var(--quiet);border-radius:50%}.office-connection[data-state=live]::before{background:var(--success)}.office-connection[data-state=offline]::before,.office-connection[data-state=stale]::before{background:var(--amber)}
+.office-stage{margin:0;min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 8px 25px #0002}
+.office-canvas{display:block;width:100%;height:auto;image-rendering:pixelated;image-rendering:crisp-edges;background:var(--panel)}
+.office-status{display:flex;align-items:center;gap:13px;min-height:78px;padding:16px 20px;border-top:1px solid var(--line);background:var(--surface)}
+.office-event-icon{flex:0 0 34px;height:34px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--amber);font-size:17px}.office-event-icon svg{width:17px;height:17px}
+.office-event-copy{flex:1;min-width:0}.office-event-copy strong{display:block;color:var(--text);font-size:12px;font-weight:600;overflow-wrap:anywhere}.office-event-copy p{font-size:11px;line-height:1.65;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.office-status time{flex-shrink:0;font-size:10px;color:var(--quiet);font-variant-numeric:tabular-nums}
+.office-roster{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:0 22px;padding:8px 0;margin:18px 0 0;list-style:none}
+.office-roster>li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 0;border-bottom:1px solid var(--soft);min-width:0;font-size:11px;color:var(--muted)}
+.office-roster strong{font-size:12px;color:var(--text);font-weight:500;min-width:0;overflow-wrap:anywhere}
+.office-roster span{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;color:var(--quiet);font-size:10px;line-height:1.5}
+.office-roster span::before{content:"";width:4px;height:4px;border-radius:50%;background:currentColor}
+.office-roster .office-owner>span{color:var(--amber)}
+.office-agent[data-state=working]>span{color:var(--success)}.office-agent[data-state=idle]>span{color:var(--muted)}
+.office-note{font-size:10px;color:var(--quiet);line-height:1.75;margin-top:16px;max-width:850px;overflow-wrap:anywhere}
+@container(max-width:600px){.office-heading{margin-bottom:16px}.office-status{padding:13px;gap:10px;flex-wrap:wrap}.office-status time{margin-left:44px}.office-roster{grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px}.office-roster>li{flex-wrap:wrap;gap:4px}.office-roster strong{flex-basis:100%}}
+@container(max-width:360px){.office-roster{grid-template-columns:minmax(0,1fr)}.office-status time{margin-left:0}.office-event-icon{display:none}}
+@media(max-height:800px){.office-heading{margin-bottom:12px}.office-status{min-height:54px;padding-block:8px}}
+@media(prefers-reduced-motion:reduce){.office-page *{scroll-behavior:auto!important}}

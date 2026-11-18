@@ -21,6 +21,7 @@ const { GcbService, PROFILE_OPERATIONS } = require('./gcb-service.cjs');
 const { authorizeProfileTarget, authorizeLocalProfileTarget } = require('./gcb-native.cjs');
 const { nativeSetupUrl } = require('./model-rpc.cjs');
 const { readProjectObservation } = require('./project-observation.cjs');
+const { OFFICE_NAME } = require('../shared/office-cast.mjs');
 const INTERACTIVE = new Set(['plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','composerOptions','setComposer']);
 const MUTATIONS = new Set(['send','abort','resolveApproval','saveSettings','setComposer']);
 
@@ -231,8 +232,8 @@ function createMenu() {
       item('toggle-work', 'Toggle Work Sidebar', 'Alt+Command+I'),
       item('toggle-terminal', 'Toggle Terminal Split', 'Control+`'),
       { type: 'separator' },
-      ...['Conversations', 'Agents', 'Projects', 'Activity', 'Automations','Approvals','Models'].map((name, i) =>
-        item('view:' + name, name, 'Command+' + (i + 1))),
+      ...['Conversations', 'Agents', 'Projects', 'Activity', 'Automations','Approvals','Models','Office'].map((name, i) =>
+        item('view:' + name, name === 'Office' ? OFFICE_NAME : name, 'Command+' + (i + 1))),
       { type: 'separator' },
       { label: 'Appearance', submenu: [item('theme:dark', 'Dark'), item('theme:light', 'Light')] },
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
@@ -315,6 +316,9 @@ else {
       ['/models.css', ['models.css', 'text/css; charset=utf-8']],
       ['/models-view.mjs', ['models-view.mjs', 'text/javascript; charset=utf-8']],
       ['/profile-view.mjs', ['profile-view.mjs', 'text/javascript; charset=utf-8']],
+      ['/office.css', ['office.css', 'text/css; charset=utf-8']],
+      ['/office-view.mjs', ['office-view.mjs', 'text/javascript; charset=utf-8']],
+      ['/office-scene.mjs', ['office-scene.mjs', 'text/javascript; charset=utf-8']],
       ['/content.mjs', ['content.mjs', 'text/javascript; charset=utf-8']],
       ['/terminal-view.mjs', ['terminal-view.mjs', 'text/javascript; charset=utf-8']],
       ['/read-aloud.mjs', ['read-aloud.mjs', 'text/javascript; charset=utf-8']],
@@ -324,6 +328,7 @@ else {
       ['/vendor/addon-fit.mjs', ['vendor/addon-fit.mjs', 'text/javascript; charset=utf-8']],
       ['/vendor/xterm.css', ['vendor/xterm.css', 'text/css; charset=utf-8']],
       ['/shared/activity-model.mjs', ['../shared/activity-model.mjs', 'text/javascript; charset=utf-8']],
+      ['/shared/office-cast.mjs', ['../shared/office-cast.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/run-status.mjs', ['../shared/run-status.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/helper-tasks.mjs', ['../shared/helper-tasks.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/async-questions.mjs', ['../shared/async-questions.mjs', 'text/javascript; charset=utf-8']],
