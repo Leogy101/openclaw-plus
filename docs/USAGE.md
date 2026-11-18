@@ -24,6 +24,8 @@ Use **Load earlier messages** to inspect older history. Question detection cover
 
 Open **Office** in the sidebar or press **⌘8**. Tom and The Boss have private rooms. Spike, Athena and Goose share the open floor. Agents with observed active turns work at their desks. When no active turn is observed for an agent, their character takes a coffee or water break.
 
+The fixed cast follows OpenClaw agent IDs `main` (Tom), `spike`, `athena` and `goose`. A character whose ID is absent shows **Activity unknown**.
+
 Recorded delegations and handoffs prompt visits between agents in the scene. Tom visits The Boss when OpenClaw records a successful final reply to you in a direct conversation. The activity strip and roster describe the current observation. An agent with unknown activity stays at their desk between recorded visits. The view uses recent session metadata, and the original conversation contains the reply text.
 
 ## Voice and read-aloud
