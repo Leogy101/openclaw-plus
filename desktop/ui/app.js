@@ -7,11 +7,13 @@ import { createTerminalView } from './terminal-view.mjs';
 import { createReadAloud } from './read-aloud.mjs';
 import { createVoiceController } from './voice-view.mjs';
 import { createModelsView } from './models-view.mjs';
+import { createOfficeView } from './office-view.mjs';
 const icons={chat:'M4 4h16v12H8l-4 4V4Z',agents:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M16 3a4 4 0 0 1 0 8 M22 21v-2a4 4 0 0 0-3-3.87 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',folder:'M3 5h6l2 2h10v13H3V5Z',activity:'M3 12h4l3-8 4 16 3-8h4',clock:'M12 8v4l3 2 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',plus:'M12 5v14 M5 12h14',search:'M21 21l-5-5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',sidebar:'M3 4h18v16H3V4Z M9 4v16',panel:'M3 4h18v16H3V4Z M15 4v16',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',arrow:'M5 12h14 m-5-5 5 5-5 5',back:'M19 12H5 m5-5-5 5 5 5',up:'M12 19V5 m-5 5 5-5 5 5',close:'m6 6 12 12 M18 6 6 18',check:'m5 12 4 4L19 6',terminal:'m4 6 6 6-6 6 M13 18h7',file:'M14 2H5v20h14V7l-5-5Z M14 2v6h5 M8 13h8 M8 17h6',shield:'m12 3 8 4v5c0 5-8 9-8 9s-8-4-8-9V7l8-4Z m-4 9 3 3 5-6',moon:'M20 14a9 9 0 0 1-10-12A10 10 0 1 0 22 14h-2Z',sun:'M12 2v2 M12 20v2 M2 12h2 M20 12h2 m-15-7 1 1 m12 12 1 1 M5 19l1-1 M18 6l1-1 M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',more:'M5 12h.01 M12 12h.01 M19 12h.01',link:'m10 13 4-4 M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0 M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0',alert:'M12 3 2 21h20L12 3Z M12 9v5 M12 17h.01',globe:'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M2 12h20 M12 2c6 6 6 14 0 20-6-6-6-14 0-20',bolt:'m13 2-9 12h7l-1 8 10-12h-7V2Z',copy:'M9 9h12v12H9V9Z M15 5V2H2v13h3',play:'m8 4 12 8-12 8V4Z'};
 'use strict';
 icons.speaker='m11 5-6 4H2v6h3l6 4V5Z M15 8a6 6 0 0 1 0 8 M18 5a10 10 0 0 1 0 14';
 icons.stop='M6 6h12v12H6V6Z';
 icons.mic='M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5Z M5 10v2a7 7 0 0 0 14 0v-2 M12 19v3 M8 22h8';
+icons.office='M3 21V8h6V3h12v18H3Z M7 12h2m-2 4h2m4-9h4m-4 4h4m-4 4h4m-3 6v-3h2v3';
 // Live desktop renderer. Gateway state belongs to OpenClaw; this file owns presentation only.
 const desktop = window.openclawPlusDesktop;
 const $ = id => document.getElementById(id);
@@ -61,7 +63,9 @@ let terminalView=null;
 let readAloud=null;
 let voiceView=null;
 let modelsView=null;
-let modelsTerminalWasVisible=false;
+let officeView=null;
+let fullPageTerminalWasVisible=false;
+const fullPageView = view => view==='Models'||view==='Office';
 const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');
 let transcriptMotion=null;
 let transcriptScrollPause=null;
@@ -157,7 +161,7 @@ function sessionButton(item, cls='session-item', label=null, child=false) {
 }
 function failure(title, message, retry) { return `<div class="error-note"><strong>${esc(title)}</strong>${esc(message)}${retry ? btn(retry,'Try again') : ''}</div>`; }
 function limitsHTML(limits=[]) { return limits.filter(Boolean).map(item=>`<p class="limit-note">${linkedText(typeof item === 'string' ? item : item.message || item.reason || 'Some records are not available through this connection.')}</p>`).join(''); }
-function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();syncAsyncReplyForms();renderPermissionDialog();syncNewConversationDialog();renderVoiceStatus(); }
+function setConnection(connection) { if(connection) state.connection={...state.connection,...connection}; officeView?.setConnected(online());if(!online()){readAloud?.stop();stopVoice();invalidatePermissionReview();}renderConnection();syncReadAloudButtons();syncAsyncReplyForms();renderPermissionDialog();syncNewConversationDialog();renderVoiceStatus(); }
 function renderConnection() {
   renderActivityIndicators();renderActivityCurrent();renderRunStatus();scheduleActivityFreshness();
   renderContextMeter();
@@ -171,7 +175,7 @@ function renderConnection() {
   replaceRegion('connection-notice',message ? `<div class="notice ${online()?'connected':''}" role="status">${icon(online()?'globe':'alert')}<span class="grow">${esc(message)}${!online() && state.connection.updatedAt ? ` Last observed ${esc(stamp(state.connection.updatedAt))}.` : ''}</span>${status !== 'connecting' ? btn('reconnect',state.reconnecting?'Reconnecting…':'Reconnect','text-btn',state.reconnecting?'disabled':'') : ''}</div>` : '');
 }
 function renderNavigation() {
-  const destinations=[['Conversations','chat'],['Agents','agents'],['Projects','folder'],['Activity','activity'],['Automations','clock'],['Approvals','shield'],['Models','bolt']];
+  const destinations=[['Conversations','chat'],['Agents','agents'],['Projects','folder'],['Activity','activity'],['Automations','clock'],['Approvals','shield'],['Models','bolt'],['Office','office']];
   replaceRegion('primary-nav',destinations.map(([view,glyph])=>btn('view',icon(glyph)+`<span>${view}</span>${view==='Approvals'&&pendingApprovals().length?`<span class="nav-count">${pendingApprovals().length}</span>`:''}`,'nav-item '+(state.view===view?'active':''),`data-view="${view}" data-focus="nav-${view}" ${state.view===view?'aria-current="page"':''}`)).join(''));
   replaceRegion('agent-filter',state.agentId ? `<div class="filter-note">${esc(nameFor(state.agentId))} ${btn('clear-filter','Clear filter','text-btn')}</div>` : '');
   let content=state.overviewStale?'<p class="region-note">Loaded pages retained. '+btn('refresh-overview','Refresh list','text-btn')+' for the latest changes.</p>':'';content+=state.overviewError ? failure('Could not refresh conversations',state.overviewError,'refresh-overview') : '';
@@ -195,14 +199,18 @@ function heading() {
 }
 function mainShell() {
   const mode=state.view==='Conversations' ? 'conversation' : state.view;
-  if($('main-region').dataset.mode === mode) return;
+  const previous=$('main-region').dataset.mode;
+  if(previous===mode)return;
   cancelTranscriptMotion();
-  if($('main-region').dataset.mode==='Models'){
-    modelsView?.close();terminalView?.setContext(state.selected);
-    if(modelsTerminalWasVisible)terminalView?.setVisible(true);modelsTerminalWasVisible=false;
+  if(previous==='Models')modelsView?.close();
+  if(previous==='Office'){officeView?.close();officeView=null;}
+  if(fullPageView(previous)&&!fullPageView(mode)){
+    terminalView?.setContext(state.selected);
+    if(fullPageTerminalWasVisible)terminalView?.setVisible(true);
+    fullPageTerminalWasVisible=false;
   }
-  if(mode==='Models'){
-    modelsTerminalWasVisible=$('toggle-terminal').getAttribute('aria-expanded')==='true';
+  if(fullPageView(mode)&&!fullPageView(previous)){
+    fullPageTerminalWasVisible=$('toggle-terminal').getAttribute('aria-expanded')==='true';
     terminalView?.setVisible(false);
   }
   $('main-region').dataset.mode=mode;
@@ -496,6 +504,10 @@ function renderPage() {
     if(!modelsView)modelsView=createModelsView({desktop,container:$('page-content'),onStatus:toast});
     modelsView.render($('page-content'));return;
   }
+  if(state.view==='Office'){
+    if(!officeView)officeView=createOfficeView({container:$('page-content'),read:()=>rpc('office'),connected:online()});
+    return;
+  }
   if(state.view==='Settings'){renderSettings();return;}
   if(state.view==='Approvals'){renderApprovals();return;}
   let html='';
@@ -518,11 +530,11 @@ function renderPage() {
 function layout() {
   document.body.classList.toggle('nav-hidden',state.navHidden&&viewWidth()>=1000);
   $('navigation').classList.toggle('drawer',state.navOpen&&viewWidth()<1000);
-  const workVisible=state.panel&&state.view!=='Models';
+  const workVisible=state.panel&&!fullPageView(state.view);
   $('workspace').classList.toggle('no-panel',!workVisible);
   $('work-panel').hidden=!workVisible;
-  $('toggle-work').hidden=state.view==='Models';
-  $('toggle-terminal').hidden=state.view==='Models';
+  $('toggle-work').hidden=fullPageView(state.view);
+  $('toggle-terminal').hidden=fullPageView(state.view);
   $('toggle-work').setAttribute('aria-expanded',String(workVisible));
   const sheet=workVisible&&viewWidth()<1280;
   $('sheet-scrim').hidden=!sheet;
@@ -652,7 +664,7 @@ function back() {
   replaceRegion('messages','',{force:true});render();loadHistory();loadPlan();loadActivityForContexts();loadComposerOptions(state.selected);if(state.panel)loadWork();announce(`Returned to ${nameFor(origin.selected.agentId)}`);
 }
 function openView(view) {if(view!=='Conversations'){readAloud?.stop();stopVoice();}state.view=view;state.navOpen=false;render();$('page-title')?.focus({preventScroll:true});if(view==='Automations')loadAutomations();if(view==='Activity')loadRunning();if(view==='Approvals')loadApprovals({explicit:true});if(view==='Agents')loadActivityForContexts();if(view==='Models')modelsView?.load();}
-function setTheme(theme) {if(!['light','dark'].includes(theme))return;state.theme=theme;document.documentElement.dataset.theme=theme;desktop?.setAppearance?.(theme);terminalView?.setTheme();$('theme-toggle').innerHTML=icon(theme==='dark'?'sun':'moon');$('theme-toggle').setAttribute('aria-label',`Switch to ${theme==='dark'?'light':'dark'} theme`);}
+function setTheme(theme) {if(!['light','dark'].includes(theme))return;state.theme=theme;document.documentElement.dataset.theme=theme;desktop?.setAppearance?.(theme);terminalView?.setTheme();officeView?.themeChanged();$('theme-toggle').innerHTML=icon(theme==='dark'?'sun':'moon');$('theme-toggle').setAttribute('aria-label',`Switch to ${theme==='dark'?'light':'dark'} theme`);}
 function showDialog(title,body,{search=false}={}) {
   state.modalReturn=actionKey(document.activeElement);state.modal={title,search};
   $('overlay').innerHTML=`<div class="backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title"><div class="modal-head"><h2 id="dialog-title">${esc(title)}</h2>${btn('close-dialog',icon('close'),'icon-btn','aria-label="Close dialog"')}</div><div class="modal-body dialog-copy">${body}</div></section></div>`;
@@ -731,13 +743,13 @@ async function createConversation() {
   loadOverview();
 }
 function quickOpen() {showDialog('Quick Open','<label class="sr-only" for="palette-search">Find a loaded conversation or view</label><input id="palette-search" class="session-search" placeholder="Find a loaded conversation or view…" autocomplete="off"><div id="palette-results" class="palette-items"></div><p class="limit-note">Searches the loaded session list. Use sidebar search to query the gateway.</p>',{search:true});renderPalette('');$('palette-search').focus();}
-function renderPalette(query) {const q=query.toLowerCase();replaceRegion('palette-results',state.sessions.filter(item=>`${item.title} ${nameFor(item.agentId)}`.toLowerCase().includes(q)).map(item=>sessionButton(item,'palette-item',`${icon('chat')}<span class="grow">${esc(item.title || 'Conversation')}<span class="small muted">${esc(nameFor(item.agentId))}</span></span>`,true)).join('')+['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Settings'].filter(view=>view.toLowerCase().includes(q)).map(view=>btn('view',icon('settings')+esc(view),'palette-item',`data-view="${view}"`)).join('') || '<p class="region-note">No loaded matches.</p>');}
+function renderPalette(query) {const q=query.toLowerCase();replaceRegion('palette-results',state.sessions.filter(item=>`${item.title} ${nameFor(item.agentId)}`.toLowerCase().includes(q)).map(item=>sessionButton(item,'palette-item',`${icon('chat')}<span class="grow">${esc(item.title || 'Conversation')}<span class="small muted">${esc(nameFor(item.agentId))}</span></span>`,true)).join('')+['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Office','Settings'].filter(view=>view.toLowerCase().includes(q)).map(view=>btn('view',icon('settings')+esc(view),'palette-item',`data-view="${view}"`)).join('') || '<p class="region-note">No loaded matches.</p>');}
 function connectionDialog() {showDialog('Connection',`<dl class="detail-grid"><dt>Gateway</dt><dd>${esc(state.connection.label)}</dd><dt>Status</dt><dd>${esc(state.connection.status)}</dd><dt>Runtime</dt><dd>${esc(state.connection.version || 'Not verified')}</dd><dt>Installed CLI</dt><dd>${esc(state.connection.installedVersion || 'Unknown')}</dd><dt>Protocol</dt><dd>${esc(state.connection.protocol || 'Unknown')}</dd><dt>Access</dt><dd>Gateway permissions apply</dd></dl><p>${esc(state.connection.message || 'The desktop reads your existing sessions and work through the OpenClaw gateway. Messages, approval decisions and configuration changes use your existing OpenClaw permissions.')}</p><div class="top-space">${btn('reconnect','Reconnect')}${btn('original','Open original OpenClaw ↗')}</div>`);}
 async function reconnect() {readAloud?.stop();stopVoice();invalidatePermissionReview();state.reconnecting=true;renderPermissionDialog();renderConnection();try{const result=await rpc('reconnect',{});if(result?.connection)setConnection(result.connection);await loadOverview();if(state.selected){await loadHistory();await loadPlan();}await loadApprovals({explicit:true});if(state.panel)await loadWork();if(state.view==='Automations')await loadAutomations();}catch(error){setConnection({status:'disconnected',message:errorText(error)});}finally{state.reconnecting=false;render();}}
 function scheduleRead(kind,fn) {clearTimeout(timers.get(kind));timers.set(kind,setTimeout(()=>{timers.delete(kind);fn();},250));}
 function refreshSelectedHistory(){if(state.historyLoading)return;if(state.historyExtended){state.historyStale=true;renderHistory();}else loadHistory();}
 function gatewayEvent(event) {
-  if(event.kind==='activity'){loadLatestQuestions();loadActivityForContexts();if(state.view==='Models')modelsView?.load();return;}
+  if(event.kind==='activity'){officeView?.refresh();loadLatestQuestions();loadActivityForContexts();if(state.view==='Models')modelsView?.load();return;}
   if(event.kind==='connection'){setConnection(event.connection);modelsView?.invalidateConnection(event.connection);if(state.view==='Models'&&event.connection?.status==='connected')modelsView?.load({force:true});renderHistory();renderWork();renderApprovals();renderSettings();if(online()){scheduleRead('approvals',()=>loadApprovals());if(state.selected)scheduleRead('plan',loadPlan);scheduleRead('overview',()=>loadOverview());if(state.selected)scheduleRead('history',()=>loadHistory());if(state.panel)scheduleRead('work',loadWork);if(state.view==='Automations')scheduleRead('automations',loadAutomations);}return;}
   if(event.kind==='approvals'){scheduleRead('approvals',()=>loadApprovals({explicit:true}));return;}
   if(event.kind==='plan'&&state.selected&&(!event.key||event.key===state.selected.key)){scheduleRead('plan',loadPlan);return;}
@@ -745,7 +757,7 @@ function gatewayEvent(event) {
   if(event.kind==='history'&&state.selected&&(!event.key||event.key===state.selected.key)){scheduleRead('history',refreshSelectedHistory);scheduleRead('plan',loadPlan);}
   if(event.kind==='work'&&state.workContext&&(!event.key||event.key===state.workContext.key)){if(state.panel)scheduleRead('work',loadWork);if(state.view==='Activity')scheduleRead('running',loadRunning);}
 }
-function toggleWork(force) {if(state.view==='Models')return;state.panel=force??!state.panel;layout();if(state.panel){renderWork();loadWork();loadActivityForContexts();if(viewWidth()<1280)$('close-work').focus();}else $('toggle-work').focus({preventScroll:true});}
+function toggleWork(force) {if(fullPageView(state.view))return;state.panel=force??!state.panel;layout();if(state.panel){renderWork();loadWork();loadActivityForContexts();if(viewWidth()<1280)$('close-work').focus();}else $('toggle-work').focus({preventScroll:true});}
 function runCommand(command) {
   if(command.startsWith('theme:')){setTheme(command.slice(6));return;}
   if(state.modal||modelsView?.isDialogOpen()){toast('Close the current dialog before switching views.');return;}
@@ -753,9 +765,9 @@ function runCommand(command) {
   else if(command==='quick-open')quickOpen();
   else if(command==='toggle-navigation'){if(viewWidth()<1000)state.navOpen=!state.navOpen;else state.navHidden=!state.navHidden;layout();}
   else if(command==='toggle-work')toggleWork();
-  else if(command==='toggle-terminal'&&state.view!=='Models')terminalView?.toggle();
+  else if(command==='toggle-terminal'&&!fullPageView(state.view))terminalView?.toggle();
   else if(command==='settings')openView('Settings');
-  else if(command.startsWith('view:')&&['Conversations','Agents','Projects','Activity','Automations','Approvals','Models'].includes(command.slice(5)))openView(command.slice(5));
+  else if(command.startsWith('view:')&&['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Office'].includes(command.slice(5)))openView(command.slice(5));
 }
 async function handleAction(node) {
   const action=node.dataset.action;
@@ -1611,17 +1623,17 @@ document.addEventListener('keydown',event=>{
   if(handleSlashKey(event))return;
   if(event.target.id==='composer-input'&&event.key==='Enter'&&!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){event.preventDefault();sendMessage();return;}
   if(event.key==='Escape'&&CSS.supports('selector(:open)')&&document.querySelector('.composer-select:open'))return;
-  if(event.key==='Escape'){event.preventDefault();if(state.modal)closeDialog();else if(state.processId&&state.view!=='Models'){state.processId=null;renderWork();}else if(state.panel&&state.view!=='Models'&&viewWidth()<1280)toggleWork(false);else if(state.navOpen){state.navOpen=false;layout();}else if(state.stack.length)back();return;}
-  const dialog=state.modal ? $('overlay').querySelector('[role="dialog"]') : state.panel&&state.view!=='Models'&&viewWidth()<1280 ? $('work-panel') : null;
+  if(event.key==='Escape'){event.preventDefault();if(state.modal)closeDialog();else if(state.processId&&!fullPageView(state.view)){state.processId=null;renderWork();}else if(state.panel&&!fullPageView(state.view)&&viewWidth()<1280)toggleWork(false);else if(state.navOpen){state.navOpen=false;layout();}else if(state.stack.length)back();return;}
+  const dialog=state.modal ? $('overlay').querySelector('[role="dialog"]') : state.panel&&!fullPageView(state.view)&&viewWidth()<1280 ? $('work-panel') : null;
   if(event.key==='Tab'&&dialog){const focusables=[...dialog.querySelectorAll(':is(button,input,select,textarea):not(:disabled),a[href]')].filter(node=>!node.hidden);const first=focusables[0],last=focusables.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}
   if(state.modal?.search&&['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();const list=[...$('palette-results').querySelectorAll('button')];const index=list.indexOf(document.activeElement);list[(index+(event.key==='ArrowDown'?1:-1)+list.length)%list.length]?.focus();}
   if(state.modal?.search&&event.key==='Enter'&&event.target.id==='palette-search'){event.preventDefault();$('palette-results').querySelector('button')?.click();}
   if(!desktop?.isDesktop&&(event.metaKey||event.ctrlKey)){const key=event.key.toLowerCase();const command=key==='k'?'quick-open':key==='n'?'new':key==='b'?'toggle-navigation':key===','?'settings':event.altKey&&key==='i'?'toggle-work':/^[1-5]$/.test(key)?'view:'+['Conversations','Agents','Projects','Activity','Automations'][+key-1]:null;if(command){event.preventDefault();runCommand(command);}}
 });
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stopVoice();renderRunStatus();scheduleActivityFreshness();});
-addEventListener('pagehide',()=>{readAloud?.stop();stopVoice();});
+addEventListener('pagehide',()=>{readAloud?.stop();stopVoice();officeView?.close();officeView=null;});
 addEventListener('beforeunload',()=>{readAloud?.stop();voiceView?.destroy();modelsView?.destroy();});
-addEventListener('resize',()=>{scheduleRead('layout',()=>{layout();if(state.panel&&state.view!=='Models'&&viewWidth()<1280&&!state.modal&&!$('work-panel').contains(document.activeElement))$('close-work').focus({preventScroll:true});});});
+addEventListener('resize',()=>{scheduleRead('layout',()=>{layout();if(state.panel&&!fullPageView(state.view)&&viewWidth()<1280&&!state.modal&&!$('work-panel').contains(document.activeElement))$('close-work').focus({preventScroll:true});});});
 function beforeTerminalLayout() {
   const el=$('transcript'),snapshot=transcriptSnapshot();cancelTranscriptMotion();
   return el&&snapshot?{el,snapshot,key:identity(state.selected)}:null;

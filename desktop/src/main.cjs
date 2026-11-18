@@ -231,7 +231,7 @@ function createMenu() {
       item('toggle-work', 'Toggle Work Sidebar', 'Alt+Command+I'),
       item('toggle-terminal', 'Toggle Terminal Split', 'Control+`'),
       { type: 'separator' },
-      ...['Conversations', 'Agents', 'Projects', 'Activity', 'Automations','Approvals','Models'].map((name, i) =>
+      ...['Conversations', 'Agents', 'Projects', 'Activity', 'Automations','Approvals','Models','Office'].map((name, i) =>
         item('view:' + name, name, 'Command+' + (i + 1))),
       { type: 'separator' },
       { label: 'Appearance', submenu: [item('theme:dark', 'Dark'), item('theme:light', 'Light')] },
@@ -315,6 +315,9 @@ else {
       ['/models.css', ['models.css', 'text/css; charset=utf-8']],
       ['/models-view.mjs', ['models-view.mjs', 'text/javascript; charset=utf-8']],
       ['/profile-view.mjs', ['profile-view.mjs', 'text/javascript; charset=utf-8']],
+      ['/office.css', ['office.css', 'text/css; charset=utf-8']],
+      ['/office-view.mjs', ['office-view.mjs', 'text/javascript; charset=utf-8']],
+      ['/office-scene.mjs', ['office-scene.mjs', 'text/javascript; charset=utf-8']],
       ['/content.mjs', ['content.mjs', 'text/javascript; charset=utf-8']],
       ['/terminal-view.mjs', ['terminal-view.mjs', 'text/javascript; charset=utf-8']],
       ['/read-aloud.mjs', ['read-aloud.mjs', 'text/javascript; charset=utf-8']],

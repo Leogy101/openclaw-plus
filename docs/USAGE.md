@@ -20,6 +20,12 @@ Use **Load earlier messages** to inspect older history. Question detection cover
 
 **Activity** shows returned active sessions. **Automations** shows existing schedules and execution history. Missing, stale or ambiguous telemetry remains unverified. A response timer or token count describes an observed response, not proof that engineering work was completed.
 
+## Office
+
+Open **Office** in the sidebar or press **⌘8**. The pixel art floor plan gives each returned agent a desk and shows observed active turns as work at the desk. Confirmed delegations and recorded agent messages move a character between offices. When OpenClaw records a successful final reply for a direct user turn from the primary agent, that agent visits **Your office**. For the standard `main` agent, this is Tom if that is his display name.
+
+The display checks recent sessions while the page is visible. The activity strip names the latest observed visit, and the roster provides a text equivalent of the desk states. OpenClaw may omit activity or handoff metadata from the sampled sessions. Final replies represent a recorded response to you. For project status and the reply text, use the original conversation.
+
 ## Voice and read-aloud
 
 Choose **Read aloud** beside an assistant report to use OpenClaw's configured speech provider. The same control stops playback. Reports play in chunks; fenced code, hidden reasoning and tool output are excluded. Stopping prevents later chunks and discards late audio, but cannot undo a speech request already sent to the provider.

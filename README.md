@@ -11,6 +11,7 @@ An independent macOS desktop workspace for your existing OpenClaw installation. 
 - Start or continue conversations, review tool activity, attach supported files and answer asynchronous questions.
 - Browse slash commands in the composer, see context usage and choose a model or reasoning level while the conversation refreshes.
 - Follow agent sessions, activity and existing automations; review native approval requests.
+- Watch observed agent work and handoffs in the read-only pixel art Office.
 - Read reports aloud, dictate into a draft or talk through supported, configured OpenClaw voice providers.
 - Open a terminal for a conversation and copy selected output into a message draft.
 - Review a conversation's execution permissions and explicitly apply supported native modes.
