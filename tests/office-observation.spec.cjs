@@ -41,7 +41,7 @@ test('native positive work, complete quiet observations and physical delegation 
   assert.equal(JSON.stringify(result).includes('PRIVATE'),false);
 });
 
-test('history budget prioritizes the GlauxOS Office cast without treating other agents as missing',async()=>{
+test('history budget prioritizes the fixed Office cast without treating other agents as missing',async()=>{
   const other={...builder,key:'agent:extra:main',sessionId:'extra-1',agentId:'extra',updatedAt:now,parentSessionKey:undefined,parentSessionId:undefined};
   const cast=['spike','athena','goose'].map(id=>({...coordinator,key:`agent:${id}:main`,sessionId:`${id}-1`,agentId:id}));
   const {read,calls}=fixture({rows:[coordinator,other,...cast],roster:{agents:['main','extra','spike','athena','goose'].map(id=>({id}))}});

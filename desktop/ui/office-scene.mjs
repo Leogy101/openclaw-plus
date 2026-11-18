@@ -1,4 +1,6 @@
 // Original pixel drawing. This module presents observations; it does not infer work.
+import { OFFICE_NAME } from '../shared/office-cast.mjs';
+
 const GLYPHS = {
   A:'01110/10001/10001/11111/10001/10001/10001',B:'11110/10001/10001/11110/10001/10001/11110',C:'01111/10000/10000/10000/10000/10000/01111',
   D:'11110/10001/10001/10001/10001/10001/11110',E:'11111/10000/10000/11110/10000/10000/11111',F:'11111/10000/10000/11110/10000/10000/10000',
@@ -133,7 +135,7 @@ export function createOfficeScene(canvas){
     rect(21,157,534,1,p.tileLine);for(let x=24;x<552;x+=27)rect(x,151,14,1,p.tile);
     office(people[0],p,time,reducedMotion);office(BOSS,p,time,reducedMotion);
     // An olive-and-gold foyer sign and notice board mark the shared space.
-    windowPane(233,22,110,p);rect(239,56,99,24,p.olive);rect(241,58,95,1,p.goldLight);text('GLAUXOS',239,64,p.goldLight,99,'center');
+    windowPane(233,22,110,p);rect(239,56,99,24,p.olive);rect(241,58,95,1,p.goldLight);text(OFFICE_NAME,239,64,p.goldLight,99,'center');
     rect(248,88,83,33,p.woodEdge);rect(251,91,77,27,p.goldDark);rect(256,95,18,18,p.paper);rect(280,94,18,20,'#d3bd85');rect(305,96,15,17,'#a7bc97');
     rect(263,94,3,2,p.ink);rect(287,93,3,2,p.ink);rect(310,95,3,2,p.ink);rect(258,101,12,1,p.wallShade);rect(258,105,10,1,p.wallShade);
     plant(217,108,p);plant(342,108,p);

@@ -21,6 +21,7 @@ const { GcbService, PROFILE_OPERATIONS } = require('./gcb-service.cjs');
 const { authorizeProfileTarget, authorizeLocalProfileTarget } = require('./gcb-native.cjs');
 const { nativeSetupUrl } = require('./model-rpc.cjs');
 const { readProjectObservation } = require('./project-observation.cjs');
+const { OFFICE_NAME } = require('../shared/office-cast.mjs');
 const INTERACTIVE = new Set(['plan','send','abort','createConversation','approvals','resolveApproval','settings','saveSettings','composerOptions','setComposer']);
 const MUTATIONS = new Set(['send','abort','resolveApproval','saveSettings','setComposer']);
 
@@ -232,7 +233,7 @@ function createMenu() {
       item('toggle-terminal', 'Toggle Terminal Split', 'Control+`'),
       { type: 'separator' },
       ...['Conversations', 'Agents', 'Projects', 'Activity', 'Automations','Approvals','Models','Office'].map((name, i) =>
-        item('view:' + name, name, 'Command+' + (i + 1))),
+        item('view:' + name, name === 'Office' ? OFFICE_NAME : name, 'Command+' + (i + 1))),
       { type: 'separator' },
       { label: 'Appearance', submenu: [item('theme:dark', 'Dark'), item('theme:light', 'Light')] },
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },

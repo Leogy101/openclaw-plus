@@ -20,9 +20,9 @@ Use **Load earlier messages** to inspect older history. Question detection cover
 
 **Activity** shows returned active sessions. **Automations** shows existing schedules and execution history. Missing, stale or ambiguous telemetry remains unverified. A response timer or token count describes an observed response, not proof that engineering work was completed.
 
-## GlauxOS Office
+## The Office
 
-Open **Office** in the sidebar or press **⌘8**. Tom and The Boss have private rooms. Spike, Athena and Goose share the open floor. Agents with observed active turns work at their desks. When no active turn is observed for an agent, their character takes a coffee or water break.
+Open **The Office** in the sidebar or press **⌘8**. Tom and The Boss have private rooms. Spike, Athena and Goose share the open floor. Agents with observed active turns work at their desks. When no active turn is observed for an agent, their character takes a coffee or water break.
 
 The fixed cast follows OpenClaw agent IDs `main` (Tom), `spike`, `athena` and `goose`. A character whose ID is absent shows **Activity unknown**.
 

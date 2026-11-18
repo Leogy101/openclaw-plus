@@ -3,6 +3,7 @@ import { viewAtTime, mergeTimeline } from '../shared/activity-model.mjs';
 import { viewRunStatus, stoppableRunId, RUN_FRESH_MS } from '../shared/run-status.mjs';
 import { helperTasksFromMessages } from '../shared/helper-tasks.mjs';
 import { projectAsyncQuestions } from '../shared/async-questions.mjs';
+import { OFFICE_NAME } from '../shared/office-cast.mjs';
 import { createTerminalView } from './terminal-view.mjs';
 import { createReadAloud } from './read-aloud.mjs';
 import { createVoiceController } from './voice-view.mjs';
@@ -66,6 +67,7 @@ let modelsView=null;
 let officeView=null;
 let fullPageTerminalWasVisible=false;
 const fullPageView = view => view==='Models'||view==='Office';
+const viewLabel = view => view==='Office' ? OFFICE_NAME : view;
 const motionPreference=matchMedia('(prefers-reduced-motion: reduce)');
 let transcriptMotion=null;
 let transcriptScrollPause=null;
@@ -176,7 +178,7 @@ function renderConnection() {
 }
 function renderNavigation() {
   const destinations=[['Conversations','chat'],['Agents','agents'],['Projects','folder'],['Activity','activity'],['Automations','clock'],['Approvals','shield'],['Models','bolt'],['Office','office']];
-  replaceRegion('primary-nav',destinations.map(([view,glyph])=>btn('view',icon(glyph)+`<span>${view}</span>${view==='Approvals'&&pendingApprovals().length?`<span class="nav-count">${pendingApprovals().length}</span>`:''}`,'nav-item '+(state.view===view?'active':''),`data-view="${view}" data-focus="nav-${view}" ${state.view===view?'aria-current="page"':''}`)).join(''));
+  replaceRegion('primary-nav',destinations.map(([view,glyph])=>btn('view',icon(glyph)+`<span>${viewLabel(view)}</span>${view==='Approvals'&&pendingApprovals().length?`<span class="nav-count">${pendingApprovals().length}</span>`:''}`,'nav-item '+(state.view===view?'active':''),`data-view="${view}" data-focus="nav-${view}" ${state.view===view?'aria-current="page"':''}`)).join(''));
   replaceRegion('agent-filter',state.agentId ? `<div class="filter-note">${esc(nameFor(state.agentId))} ${btn('clear-filter','Clear filter','text-btn')}</div>` : '');
   let content=state.overviewStale?'<p class="region-note">Loaded pages retained. '+btn('refresh-overview','Refresh list','text-btn')+' for the latest changes.</p>':'';content+=state.overviewError ? failure('Could not refresh conversations',state.overviewError,'refresh-overview') : '';
   if (!state.overviewReady && state.overviewLoading) content+='<p class="navigation-empty">Loading conversations…</p>';
@@ -188,7 +190,7 @@ function renderNavigation() {
 }
 function heading() {
   const selected=state.selected;
-  const title=state.view==='Conversations' ? selected?.title || 'Your conversations' : state.view;
+  const title=state.view==='Conversations' ? selected?.title || 'Your conversations' : viewLabel(state.view);
   const origin=state.stack.at(-1);
   if(state.view==='Conversations'){
     const connection=state.connection.label||'Local OpenClaw',agent=selected?nameFor(selected.agentId):'Personal workspace';
@@ -743,7 +745,7 @@ async function createConversation() {
   loadOverview();
 }
 function quickOpen() {showDialog('Quick Open','<label class="sr-only" for="palette-search">Find a loaded conversation or view</label><input id="palette-search" class="session-search" placeholder="Find a loaded conversation or view…" autocomplete="off"><div id="palette-results" class="palette-items"></div><p class="limit-note">Searches the loaded session list. Use sidebar search to query the gateway.</p>',{search:true});renderPalette('');$('palette-search').focus();}
-function renderPalette(query) {const q=query.toLowerCase();replaceRegion('palette-results',state.sessions.filter(item=>`${item.title} ${nameFor(item.agentId)}`.toLowerCase().includes(q)).map(item=>sessionButton(item,'palette-item',`${icon('chat')}<span class="grow">${esc(item.title || 'Conversation')}<span class="small muted">${esc(nameFor(item.agentId))}</span></span>`,true)).join('')+['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Office','Settings'].filter(view=>view.toLowerCase().includes(q)).map(view=>btn('view',icon('settings')+esc(view),'palette-item',`data-view="${view}"`)).join('') || '<p class="region-note">No loaded matches.</p>');}
+function renderPalette(query) {const q=query.toLowerCase();replaceRegion('palette-results',state.sessions.filter(item=>`${item.title} ${nameFor(item.agentId)}`.toLowerCase().includes(q)).map(item=>sessionButton(item,'palette-item',`${icon('chat')}<span class="grow">${esc(item.title || 'Conversation')}<span class="small muted">${esc(nameFor(item.agentId))}</span></span>`,true)).join('')+['Conversations','Agents','Projects','Activity','Automations','Approvals','Models','Office','Settings'].filter(view=>viewLabel(view).toLowerCase().includes(q)).map(view=>btn('view',icon('settings')+esc(viewLabel(view)),'palette-item',`data-view="${view}"`)).join('') || '<p class="region-note">No loaded matches.</p>');}
 function connectionDialog() {showDialog('Connection',`<dl class="detail-grid"><dt>Gateway</dt><dd>${esc(state.connection.label)}</dd><dt>Status</dt><dd>${esc(state.connection.status)}</dd><dt>Runtime</dt><dd>${esc(state.connection.version || 'Not verified')}</dd><dt>Installed CLI</dt><dd>${esc(state.connection.installedVersion || 'Unknown')}</dd><dt>Protocol</dt><dd>${esc(state.connection.protocol || 'Unknown')}</dd><dt>Access</dt><dd>Gateway permissions apply</dd></dl><p>${esc(state.connection.message || 'The desktop reads your existing sessions and work through the OpenClaw gateway. Messages, approval decisions and configuration changes use your existing OpenClaw permissions.')}</p><div class="top-space">${btn('reconnect','Reconnect')}${btn('original','Open original OpenClaw ↗')}</div>`);}
 async function reconnect() {readAloud?.stop();stopVoice();invalidatePermissionReview();state.reconnecting=true;renderPermissionDialog();renderConnection();try{const result=await rpc('reconnect',{});if(result?.connection)setConnection(result.connection);await loadOverview();if(state.selected){await loadHistory();await loadPlan();}await loadApprovals({explicit:true});if(state.panel)await loadWork();if(state.view==='Automations')await loadAutomations();}catch(error){setConnection({status:'disconnected',message:errorText(error)});}finally{state.reconnecting=false;render();}}
 function scheduleRead(kind,fn) {clearTimeout(timers.get(kind));timers.set(kind,setTimeout(()=>{timers.delete(kind);fn();},250));}

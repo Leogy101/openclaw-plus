@@ -113,10 +113,12 @@ delete env.ELECTRON_RUN_AS_NODE;
     assert.equal(await officeCount(), 0, 'Office must not read metadata before navigation');
 
     await check('Native Office navigation mounts a read-only scene and keeps historical events static', async () => {
+      assert.ok(await page.locator('#primary-nav').getByRole('button', { name: 'The Office', exact: true }).isVisible());
+      assert.equal(await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById('view:Office').label), 'The Office');
       await menu('view:Office');
       await page.locator('.office-connection[data-state="live"]').waitFor();
       await staticStatus('report').waitFor();
-      assert.ok(await page.getByRole('heading', { name: 'GlauxOS Office' }).isVisible());
+      assert.ok(await page.getByRole('heading', { name: 'The Office', exact: true }).isVisible());
       assert.deepEqual(await page.locator('.office-roster strong').allTextContents(), ['The Boss', 'Tom', 'Spike', 'Athena', 'Goose']);
       assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 2);
       assert.equal(await page.locator('.office-agent[data-state="unknown"]').count(), 1);

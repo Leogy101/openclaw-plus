@@ -1,3 +1,5 @@
+export const OFFICE_NAME = 'The Office';
+
 export const OFFICE_CAST = [
   { id: 'main', name: 'Tom' },
   { id: 'spike', name: 'Spike' },

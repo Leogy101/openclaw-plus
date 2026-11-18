@@ -11,7 +11,7 @@ An independent macOS desktop workspace for your existing OpenClaw installation. 
 - Start or continue conversations, review tool activity, attach supported files and answer asynchronous questions.
 - Browse slash commands in the composer, see context usage and choose a model or reasoning level while the conversation refreshes.
 - Follow agent sessions, activity and existing automations; review native approval requests.
-- Watch agent work, handoffs and coffee breaks in the [read-only GlauxOS Office](docs/USAGE.md#glauxos-office).
+- Watch agent work, handoffs and coffee breaks in [The Office](docs/USAGE.md#the-office), a read-only workspace.
 - Read reports aloud, dictate into a draft or talk through supported, configured OpenClaw voice providers.
 - Open a terminal for a conversation and copy selected output into a message draft.
 - Review a conversation's execution permissions and explicitly apply supported native modes.
@@ -53,7 +53,7 @@ To build a local application, run `npm run package` from `desktop`, then open `r
 
 The [Releases page](https://github.com/Leogy101/openclaw-plus/releases) lists available downloads. To install one, verify its ZIP checksum, extract it in Finder and move **OpenClaw+.app** to Applications. Packages use ad-hoc signing, and macOS may block downloaded builds. There is no installer or automatic update channel.
 
-The published **0.8.0-preview.1** download predates GlauxOS Office. To try Office, build or run the current source using the commands above.
+The published **0.8.0-preview.1** download predates The Office. To try it, build or run the current source using the commands above.
 
 ## Try Models with GCB
 

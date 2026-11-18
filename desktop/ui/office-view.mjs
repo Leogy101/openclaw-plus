@@ -26,9 +26,8 @@ function officeSnapshot(result) {
 }
 
 export function createOfficeView({ container, read, connected }) {
-  container.innerHTML = `<section class="office-page" aria-labelledby="office-title">
+  container.innerHTML = `<section class="office-page" aria-labelledby="page-title">
     <header class="office-heading">
-      <div><h2 id="office-title">GlauxOS Office</h2></div>
       <span class="office-connection" role="status" data-state="loading">Connecting</span>
     </header>
     <figure class="office-stage" aria-label="Pixel art office with two private rooms, three shared desks, a coffee station and a water cooler">
