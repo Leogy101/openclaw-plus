@@ -41,6 +41,16 @@ test('native positive work, complete quiet observations and physical delegation 
   assert.equal(JSON.stringify(result).includes('PRIVATE'),false);
 });
 
+test('history budget prioritizes the GlauxOS Office cast without treating other agents as missing',async()=>{
+  const other={...builder,key:'agent:extra:main',sessionId:'extra-1',agentId:'extra',updatedAt:now,parentSessionKey:undefined,parentSessionId:undefined};
+  const cast=['spike','athena','goose'].map(id=>({...coordinator,key:`agent:${id}:main`,sessionId:`${id}-1`,agentId:id}));
+  const {read,calls}=fixture({rows:[coordinator,other,...cast],roster:{agents:['main','extra','spike','athena','goose'].map(id=>({id}))}});
+  const result=await read();
+  assert.deepEqual(calls.filter(call=>call.method==='chat.history').map(call=>call.params.agentId),['main','spike','athena','goose']);
+  assert.equal(result.agents.find(agent=>agent.id==='extra').state,'working');
+  assert.equal(result.agents.find(agent=>agent.id==='goose').state,'idle');
+});
+
 test('missing, contradictory and stale evidence stays unknown; quiet partial observations remain bounded idle',async()=>{
   for(const change of [{hasActiveRun:true,activeRunIds:[]},{hasActiveRun:false,activeRunIds:['run']},{activeRunIds:['run','run']},{activeRunIds:'run'},{hasActiveRun:undefined},{snapshotAt:now-60000}]) {
     const result=await fixture({rows:[{...coordinator,...change}],activeListing:null}).read();

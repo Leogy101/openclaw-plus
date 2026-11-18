@@ -327,6 +327,7 @@ else {
       ['/vendor/addon-fit.mjs', ['vendor/addon-fit.mjs', 'text/javascript; charset=utf-8']],
       ['/vendor/xterm.css', ['vendor/xterm.css', 'text/css; charset=utf-8']],
       ['/shared/activity-model.mjs', ['../shared/activity-model.mjs', 'text/javascript; charset=utf-8']],
+      ['/shared/office-cast.mjs', ['../shared/office-cast.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/run-status.mjs', ['../shared/run-status.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/helper-tasks.mjs', ['../shared/helper-tasks.mjs', 'text/javascript; charset=utf-8']],
       ['/shared/async-questions.mjs', ['../shared/async-questions.mjs', 'text/javascript; charset=utf-8']],

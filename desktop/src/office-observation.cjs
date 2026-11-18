@@ -1,7 +1,9 @@
 'use strict';
 const { createHash } = require('node:crypto');
+const { OFFICE_CAST } = require('../shared/office-cast.mjs');
 
 const SESSION_LIMIT = 60, HISTORY_LIMIT = 4, MESSAGE_LIMIT = 24, EVENT_LIMIT = 100;
+const officeIds = new Set(OFFICE_CAST.map(agent => agent.id));
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const id = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && value.trim() === value && !/[\x00-\x1f\x7f]/u.test(value);
 const timestamp = (value, now) => {
@@ -116,6 +118,7 @@ async function readOffice(gateway, normalizeNativeMessage) {
   const candidates = preferred ? [preferred] : [];
   // Cover likely recipients across agents before taking another conversation for one agent.
   const recipientOrder = [...recent.filter(row => !excludedConversation(row)), ...recent.filter(excludedConversation)];
+  recipientOrder.sort((a, b) => Number(officeIds.has(b.agentId)) - Number(officeIds.has(a.agentId)));
   for (const row of recipientOrder) if (!candidates.some(other => other.agentId === row.agentId)) candidates.push(row);
   for (const row of recent) if (!candidates.includes(row)) candidates.push(row);
   const selected = candidates.slice(0, HISTORY_LIMIT);

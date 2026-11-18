@@ -1,4 +1,5 @@
 import { createOfficeScene } from './office-scene.mjs';
+import { BOSS_NAME, OFFICE_CAST } from '../shared/office-cast.mjs';
 
 const FRESH_MS = 45_000;
 const MAX_QUEUE = 10;
@@ -10,13 +11,27 @@ const eventIcons = {
   report: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7m-7 4h7"/>',
 };
 
+function officeSnapshot(result) {
+  const observed = new Map(result.agents.map(agent => [agent.id, agent.state]));
+  const reported = new Set(OFFICE_CAST.filter(agent => observed.has(agent.id)).map(agent => agent.id));
+  return {
+    ...result,
+    agents: OFFICE_CAST.map(agent => ({ ...agent, state: observed.get(agent.id) ?? 'unknown' })),
+    events: result.events.filter(event => {
+      if (!reported.has(event.from)) return false;
+      if (event.kind === 'report') return event.from === 'main' && event.to === null;
+      return ['delegation', 'handoff'].includes(event.kind) && event.from !== event.to && reported.has(event.to);
+    }),
+  };
+}
+
 export function createOfficeView({ container, read, connected }) {
   container.innerHTML = `<section class="office-page" aria-labelledby="office-title">
     <header class="office-heading">
-      <div><h2 id="office-title">Agent office</h2><p>Watch your agents work, delegate and bring back replies.</p></div>
+      <div><h2 id="office-title">GlauxOS Office</h2></div>
       <span class="office-connection" role="status" data-state="loading">Connecting</span>
     </header>
-    <figure class="office-stage" aria-label="Pixel art floor plan with agent offices and your office">
+    <figure class="office-stage" aria-label="Pixel art office with two private rooms, three shared desks, a coffee station and a water cooler">
       <canvas class="office-canvas" aria-hidden="true"></canvas>
       <figcaption class="office-status" data-kind="none" data-animating="false" aria-live="polite" aria-atomic="true">
         <span class="office-event-icon" aria-hidden="true"><svg viewBox="0 0 24 24"></svg></span>
@@ -24,7 +39,7 @@ export function createOfficeView({ container, read, connected }) {
         <time hidden></time>
       </figcaption>
     </figure>
-    <ul class="office-roster" aria-label="Observed agent states"></ul>
+    <ul class="office-roster" aria-label="Office roster"></ul>
     <p class="office-note">The office follows recent OpenClaw sessions. Recorded handoffs and final replies appear as visits between offices.</p>
   </section>`;
   const connection = container.querySelector('.office-connection');
@@ -61,8 +76,8 @@ export function createOfficeView({ container, read, connected }) {
     frame = 0;
   }
 
-  function paint(elapsedMs = performance.now()) {
-    scene.draw({ agents, event: current?.event, elapsedMs, reducedMotion: motion.matches,
+  function paint(timeMs = performance.now()) {
+    scene.draw({ agents, event: current?.event, elapsedMs: current ? timeMs - current.started : 0, timeMs, reducedMotion: motion.matches,
       theme: document.documentElement.dataset.theme });
   }
 
@@ -71,7 +86,7 @@ export function createOfficeView({ container, read, connected }) {
     const kind = event?.kind || 'none';
     const from = agents.find(agent => agent.id === event?.from);
     const to = agents.find(agent => agent.id === event?.to);
-    const route = from && (to || kind === 'report') ? `${from.name} → ${to?.name || 'Your office'}` : '';
+    const route = from && (to || kind === 'report') ? `${from.name} → ${to?.name || BOSS_NAME}` : '';
     const title = route || (fresh() ? 'Watching the office' : 'Office activity unavailable');
     const detail = route ? eventLabels[kind] : fresh() ? 'Waiting for a recorded handoff or final reply.' : 'Activity appears when OpenClaw supplies a current observation.';
     const key = JSON.stringify([kind, title, detail, event?.at, Boolean(current)]);
@@ -90,7 +105,7 @@ export function createOfficeView({ container, read, connected }) {
 
   function render() {
     const live = Boolean(fresh());
-    agents = (snapshot?.agents || []).map(agent => live ? agent : { ...agent, state: 'unknown' });
+    agents = (snapshot?.agents || OFFICE_CAST).map(agent => live ? agent : { ...agent, state: 'unknown' });
     const state = !online ? 'offline' : live ? 'live' : failed || snapshot ? 'stale' : 'loading';
     const label = { offline: 'Disconnected', live: 'Live observation', stale: 'Observation unavailable', loading: 'Reading activity' }[state];
     connection.dataset.state = state;
@@ -98,14 +113,15 @@ export function createOfficeView({ container, read, connected }) {
     const rows = JSON.stringify(agents);
     if (roster.dataset.rows !== rows) {
       roster.dataset.rows = rows;
-      roster.replaceChildren(...agents.map(agent => {
+      const cast = [{ name: BOSS_NAME, state: 'owner' }, ...agents];
+      roster.replaceChildren(...cast.map(person => {
         const row = document.createElement('li');
-        row.className = 'office-agent';
-        row.dataset.state = agent.state;
+        row.className = person.state === 'owner' ? 'office-owner' : 'office-agent';
+        row.dataset.state = person.state;
         const name = document.createElement('strong');
-        name.textContent = agent.name;
+        name.textContent = person.name;
         const summary = document.createElement('span');
-        summary.textContent = labels[agent.state];
+        summary.textContent = person.state === 'owner' ? 'Private office' : labels[person.state];
         row.append(name, summary);
         return row;
       }));
@@ -114,7 +130,7 @@ export function createOfficeView({ container, read, connected }) {
       ? 'OpenClaw returned a partial view. Some active turns or handoffs may be outside the sampled sessions.'
       : 'The office follows recent OpenClaw sessions. Recorded handoffs and final replies appear as visits between offices.';
     showEvent();
-    paint(current ? performance.now() - current.started : undefined);
+    paint();
   }
 
   function tick(now) {
@@ -124,14 +140,14 @@ export function createOfficeView({ container, read, connected }) {
     if (!current && queue.length) {
       const event = queue.shift();
       lastEvent = event;
-      current = { event, started: now, duration: motion.matches ? 2200 : scene.duration(event, agents) };
+      current = { event, started: now, duration: motion.matches ? 2200 : scene.duration(event, agents, now) };
     }
     showEvent();
     if (now - lastDraw >= 65) {
       lastDraw = now;
-      paint(current ? now - current.started : now);
+      paint(now);
     }
-    if (current || queue.length || !motion.matches && agents.some(agent => agent.state === 'working')) frame = requestAnimationFrame(tick);
+    if (current || queue.length || !motion.matches && agents.some(agent => agent.state === 'working' || agent.state === 'idle')) frame = requestAnimationFrame(tick);
     else paint();
   }
 
@@ -153,8 +169,8 @@ export function createOfficeView({ container, read, connected }) {
       const result = await read();
       if (generation !== epoch || closed) return;
       failed = false;
-      snapshot = result;
-      const events = [...result.events].sort((a, b) => a.at - b.at);
+      snapshot = officeSnapshot(result);
+      const events = snapshot.events.sort((a, b) => a.at - b.at);
       if (!lastEvent && events.length) lastEvent = events.at(-1);
       const now = Date.now();
       for (const [id, at] of seen) if (at <= now - 2 * FRESH_MS) seen.delete(id);
@@ -195,7 +211,7 @@ export function createOfficeView({ container, read, connected }) {
     if (!document.hidden) refresh();
   }
 
-  const resize = new ResizeObserver(() => paint(current ? performance.now() - current.started : undefined));
+  const resize = new ResizeObserver(() => paint());
   resize.observe(canvas.parentElement);
   document.addEventListener('visibilitychange', onVisibility);
   motion.addEventListener('change', redraw);

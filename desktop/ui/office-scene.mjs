@@ -14,124 +14,167 @@ const GLYPHS = {
   6:'01110/10000/10000/11110/10001/10001/01110',7:'11111/00001/00010/00100/01000/01000/01000',8:'01110/10001/10001/01110/10001/10001/01110',9:'01110/10001/10001/01111/00001/00001/01110',
   '-':'000/000/000/111/000/000/000','+':'00000/00100/00100/11111/00100/00100/00000','.':'0/0/0/0/0/1/1','?':'1110/0001/0010/0100/0100/0000/0100',' ':'000/000/000/000/000/000/000',
 };
-const COLORS = ['#679bb0','#c47c72','#94a66d','#a98fbc','#c99d58','#6dada1','#9b90c4','#be819d'];
-const hash = value => [...String(value)].reduce((sum,c)=>(sum*31+c.charCodeAt(0))>>>0,7);
-const cleanAgents = agents => {
-  const seen=new Set();return (Array.isArray(agents)?agents:[]).filter(agent=>agent&&typeof agent.id==='string'&&!seen.has(agent.id)&&seen.add(agent.id));
+const WIDTH=576,HEIGHT=324,LANE=158;
+const TEAM=[
+  {id:'main',name:'Tom',color:'#709fbc',home:{x:94,y:96},gate:170,break:{x:355,y:291,gate:329},hair:'#655044'},
+  {id:'spike',name:'Spike',color:'#d78667',home:{x:65,y:267},gate:106,break:{x:405,y:241,gate:465},hair:'#3e3532'},
+  {id:'athena',name:'Athena',color:'#b5a0d4',home:{x:165,y:267},gate:206,break:{x:500,y:247,gate:530},hair:'#484459'},
+  {id:'goose',name:'Goose',color:'#a5bb70',home:{x:265,y:267},gate:306,break:{x:417,y:291,gate:465},hair:'#906a46'},
+];
+const BOSS={id:'boss',name:'The Boss',color:'#b79b60',home:{x:464,y:96},gate:396,hair:'#b8b29a',owner:true};
+const palettes={
+  dark:{back:'#202823',edge:'#394339',wall:'#b9b49a',wallTop:'#d8d1b4',wallShade:'#8b8d72',floor:'#96795b',plank:'#a18461',seam:'#806b51',hall:'#c3b18a',tile:'#d0c19d',tileLine:'#a49673',rug:'#6c7c62',wood:'#79573e',woodLight:'#b28c5d',woodEdge:'#534731',glass:'#6b8d98',glassLight:'#adc4ba',ink:'#30392e',paper:'#e9e4c9',green:'#abc886',gold:'#c6a45b',goldLight:'#e4ca86',goldDark:'#927640',shadow:'#695b45',olive:'#68774c'},
+  light:{back:'#e6e4d5',edge:'#5a634c',wall:'#e2dcc4',wallTop:'#faf0d4',wallShade:'#b4b396',floor:'#c4a27c',plank:'#cfaf86',seam:'#b59673',hall:'#ded1ab',tile:'#eee3c3',tileLine:'#c6b98f',rug:'#9eae88',wood:'#97744d',woodLight:'#c9a36a',woodEdge:'#76603f',glass:'#a2c8ca',glassLight:'#d9e8d5',ink:'#3d4935',paper:'#fff7db',green:'#64844b',gold:'#c8a24f',goldLight:'#f2d995',goldDark:'#a0823d',shadow:'#a78e6d',olive:'#7e8c59'},
 };
-const palettes = {
-  dark:{back:'#292429',edge:'#3c3031',wall:'#bcb099',wallTop:'#d9cbb0',wallShade:'#8d7e6b',floor:'#8d705c',plank:'#9b7b63',seam:'#7e6253',hall:'#b9a38a',tile:'#c7b399',tileLine:'#ac957c',rug:'#6b7c78',wood:'#785040',woodLight:'#b18258',woodEdge:'#503d36',glass:'#516b79',glassLight:'#8aa3a5',ink:'#342e32',paper:'#e9dec3',green:'#9fca9a',gold:'#d1aa5c',goldLight:'#ebce89',goldDark:'#96733f',shadow:'#685348'},
-  light:{back:'#e8ded2',edge:'#665148',wall:'#e5d8bf',wallTop:'#fff0d5',wallShade:'#bcaa8c',floor:'#c19d78',plank:'#cdab84',seam:'#b38e6f',hall:'#d8c5a5',tile:'#e7d5b7',tileLine:'#c7b391',rug:'#8caaa1',wood:'#97704d',woodLight:'#c69b67',woodEdge:'#72533e',glass:'#a1c2ca',glassLight:'#d1e2d5',ink:'#4c3c35',paper:'#fff3d7',green:'#5f8c65',gold:'#c59a48',goldLight:'#f3d58c',goldDark:'#9f7836',shadow:'#a48263'},
-};
+const clock=value=>Number.isFinite(value)?Math.max(0,value):0;
+const roster=input=>TEAM.map(person=>({...person,state:['working','idle'].includes(input?.find?.(agent=>agent?.id===person.id)?.state)?input.find(agent=>agent?.id===person.id).state:'unknown'}));
 
-export function createOfficeScene(canvas) {
+export function createOfficeScene(canvas){
   const ctx=canvas.getContext('2d',{alpha:false});
   if(!ctx)throw new Error('The Office illustration needs a canvas context.');
+  let boundEvent=null,boundRoute=null;
   const rect=(x,y,w,h,color)=>{ctx.fillStyle=color;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));};
   function text(value,x,y,color,maxWidth=Infinity){
     const label=String(value??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toUpperCase();let cursor=x;
     for(const letter of label){const rows=(GLYPHS[letter]||GLYPHS['?']).split('/'),width=rows[0].length;if(cursor+width>x+maxWidth)break;
       rows.forEach((row,dy)=>[...row].forEach((pixel,dx)=>{if(pixel==='1')rect(cursor+dx,y+dy,1,1,color);}));cursor+=width+1;}
   }
-  function layout(input){
-    const agents=cleanAgents(input),narrow=(canvas.clientWidth||640)<520,width=narrow?360:640,columns=narrow?2:4;
-    const capacity=columns*2,floors=Math.max(1,Math.ceil((agents.length+1)/capacity)),roomWidth=(width-76)/columns-6,rooms=[];
-    const room=(slot,agent,owner=false)=>{
-      const floor=Math.floor(slot/capacity),cell=slot%capacity,bottom=cell>=columns,column=cell%columns;
-      const x=18+column*(roomWidth+6),y=30+floor*292+(bottom?156:0),hall=30+floor*292+136;
-      const home={x:x+Math.floor(roomWidth*.48),y:y+78},door={x:x+roomWidth-22,y:bottom?y-1:y+116};
-      return {x,y,w:roomWidth,h:116,floor,bottom,home,door,hall,agent,owner};
-    };
-    agents.forEach((agent,i)=>rooms.push(room(i<capacity-1?i:i+1,agent)));
-    const owner=room(capacity-1,{id:'',name:'Owner',state:'idle'},true);rooms.push(owner);
-    return {width,height:30+floors*292,columns,floors,rooms,owner,trunk:width-34};
+  function label(value,x,y,width,p,color=p.paper){rect(x,y,width,12,color);text(value,x+4,y+3,p.ink,width-8);}
+  function plant(x,y,p,large=false){
+    const scale=large?2:1;
+    rect(x+3*scale,y+11*scale,8*scale,6*scale,p.woodEdge);rect(x+2*scale,y+9*scale,10*scale,3*scale,p.woodLight);
+    rect(x+6*scale,y+2*scale,2*scale,9*scale,'#426448');rect(x,y+3*scale,7*scale,4*scale,'#77936a');
+    rect(x+7*scale,y,6*scale,5*scale,'#97ab76');rect(x+5*scale,y+5*scale,9*scale,4*scale,'#52734e');rect(x+scale,y+2*scale,3*scale,2*scale,'#b1bd83');
   }
-  function route(event,plan){
+  function parcel(x,y,p){rect(x-1,y+1,10,8,p.woodEdge);rect(x,y,8,7,p.goldLight);rect(x+3,y,2,7,p.gold);rect(x,y+2,8,1,p.goldDark);}
+  function mug(x,y,p){rect(x,y,5,5,p.paper);rect(x+5,y+1,2,3,p.paper);rect(x+1,y,3,1,p.woodEdge);}
+  function sprite(point,person,{walking=false,working=false,sip=false,idlePose=0,frame=0,carrying=false,side=1}={},p){
+    const x=Math.round(point.x),y=Math.round(point.y),hx=x+idlePose,step=walking?(frame%2?1:-1):0,hand=working&&frame%2?1:0;
+    rect(x-7,y+11,15,3,p.shadow);rect(x-4,y+5,3,7+step,'#39413b');rect(x+2,y+5,3,7-step,'#39413b');
+    rect(x-5,y+11+step,4,2,p.ink);rect(x+2,y+11-step,4,2,p.ink);rect(x-5,y-3,11,10,person.color);
+    rect(x-7,y-1+hand,2,6,'#d6a77c');rect(x+6,y-1-hand,2,6,'#d6a77c');rect(x-2,y-5,5,3,'#d6a77c');
+    rect(hx-4,y-12,9,8,'#e2b78b');rect(hx-5,y-13,10,3,person.hair);rect(hx-5,y-11,2,4,person.hair);
+    rect(hx-2,y-8,1,1,p.ink);rect(hx+3,y-8,1,1,p.ink);rect(hx,y-4,2,1,'#ba815f');rect(x-2,y-2,5,2,person.owner?p.goldLight:'#e5ddbe');
+    if(person.id==='athena'){rect(hx-5,y-16,5,4,person.hair);rect(hx-3,y-9,3,2,p.paper);rect(hx+2,y-9,3,2,p.paper);rect(hx,y-9,2,1,p.ink);}
+    if(person.id==='goose'){rect(hx-5,y-14,10,3,person.color);rect(hx+3,y-12,4,2,person.color);}
+    if(person.owner){rect(x,y,1,5,p.goldLight);rect(x-7,y-10,2,3,p.goldDark);rect(x+5,y-10,2,3,p.goldDark);}
+    if(sip){rect(x+5,y-5,3,5,'#d6a77c');mug(x+3,y-8,p);}
+    if(carrying)parcel(x+(side<0?-13:7),y+1,p);
+  }
+  function desk(x,y,person,p,time,reducedMotion,boss=false){
+    const working=person.state==='working',wood=boss?p.goldLight:p.woodLight;
+    rect(x+3,y+17,4,13,p.woodEdge);rect(x+57,y+17,4,13,p.woodEdge);rect(x-1,y+2,66,19,p.woodEdge);
+    rect(x,y,64,17,wood);rect(x+2,y+2,60,1,boss?'#fff0b2':'#dabb81');
+    rect(x+20,y-13,28,19,p.ink);rect(x+22,y-11,24,14,working?'#425b48':'#4f6362');
+    rect(x+32,y+6,3,3,p.ink);rect(x+28,y+9,12,2,p.ink);rect(x+22,y+12,25,3,p.paper);
+    if(working){const shift=reducedMotion?0:Math.floor(time/400)%3;rect(x+25,y-7,10+shift*2,1,p.green);rect(x+25,y-3,15,1,'#c1d3a5');rect(x+25,y+1,6+shift,1,p.green);}
+    else {rect(x+27,y-6,12,1,p.glass);rect(x+27,y-2,8,1,p.glass);}
+    mug(x+6,y+7,p);rect(x+53,y+6,7,9,p.paper);rect(x+54,y+8,5,1,p.wallShade);rect(x+54,y+11,5,1,p.wallShade);
+    rect(person.home.x-7,person.home.y-8,15,16,boss?'#79613b':'#596953');rect(person.home.x-8,person.home.y+2,17,4,boss?p.goldDark:'#485b47');
+  }
+  function windowPane(x,y,w,p){rect(x,y,w,23,p.woodEdge);rect(x+2,y+2,w-4,18,p.glass);rect(x+3,y+3,w-7,3,p.glassLight);rect(x+Math.floor(w/2),y+2,2,18,p.wall);rect(x-1,y+21,w+2,3,p.wallTop);}
+  function shelves(x,y,p){
+    rect(x,y,29,29,p.woodEdge);rect(x+2,y+2,25,10,p.woodLight);rect(x+2,y+16,25,10,p.woodLight);
+    for(let i=0;i<5;i++){rect(x+3+i*4,y+3+i%2,3,8-i%2,TEAM[i%4].color);rect(x+3+i*4,y+18,2,7,p.paper);}
+  }
+  function office(person,p,time,reducedMotion){
+    const boss=person.owner,x=boss?376:20,y=20,w=180,h=116;
+    rect(x+2,y+5,w,h,p.shadow);rect(x,y,w,h,p.edge);rect(x+4,y+5,w-8,h-9,boss?p.olive:p.floor);
+    for(let row=13;row<h-4;row+=13){rect(x+4,y+row,w-8,1,boss?p.rug:p.seam);for(let col=row%26?18:40;col<w-8;col+=42)rect(x+col,y+row+1,1,12,boss?p.rug:p.seam);}
+    rect(x+1,y+1,w-2,8,boss?p.gold:p.wall);rect(x+1,y+1,w-2,2,boss?p.goldLight:p.wallTop);
+    rect(x+1,y+9,3,h-13,p.wallShade);rect(x+w-4,y+9,3,h-13,p.wallShade);rect(x,y+h-5,w,5,boss?p.gold:p.wall);
+    windowPane(x+12,y+13,54,p);shelves(x+w-43,y+13,p);
+    rect(person.home.x-38,y+67,80,32,boss?p.gold:p.rug);rect(person.home.x-35,y+70,74,26,boss?p.goldLight:p.rug);
+    if(boss)rect(person.home.x-31,y+74,66,18,p.gold);
+    desk(person.home.x-31,y+43,person,p,time,reducedMotion,boss);plant(boss?x+w-24:x+9,y+81,p);
+    if(boss){rect(x+88,y+15,20,17,p.goldDark);rect(x+90,y+17,16,13,p.goldLight);rect(x+95,y+19,6,9,p.gold);}
+    const door=person.gate;rect(door-10,y+h-5,21,6,p.hall);rect(door-11,y+h-5,2,6,p.woodEdge);rect(door+10,y+h-5,2,6,p.woodEdge);rect(door-9,y+h-7,19,2,p.tile);
+    // Nameplates sit away from each doorway; only these two rooms have walls.
+    label(boss?'THE BOSS':'TOM',boss?448:43,y+h-18,boss?75:54,p,boss?p.goldLight:p.paper);
+  }
+  function breakArea(p){
+    // A change in floor finish, not a partition: the whole lower floor stays open.
+    rect(340,184,215,124,p.hall);for(let y=185;y<303;y+=16)for(let x=342;x<548;x+=16)rect(x,y,14,14,p.tile);
+    label('COFFEE',363,184,69,p);label('WATER',483,184,63,p);
+    rect(359,211,95,20,p.woodEdge);rect(361,213,91,16,p.woodLight);rect(357,208,99,5,p.paper);
+    for(let i=0;i<3;i++){rect(363+i*29,215,26,12,p.wood);rect(373+i*29,217,6,1,p.goldLight);}
+    // Drip machine, dark coffee pot, handle, hotplate and three ceramic mugs.
+    rect(368,193,21,15,p.ink);rect(370,195,17,4,p.woodLight);rect(370,201,4,7,p.ink);rect(382,201,5,7,p.ink);
+    rect(375,200,8,7,'#b5bbaa');rect(376,203,6,4,'#654b35');rect(383,201,3,4,p.paper);rect(373,207,14,2,p.ink);
+    rect(375,190,1,2,p.paper);rect(378,187,1,3,p.paper);mug(398,202,p);mug(410,202,p);mug(422,202,p);rect(438,198,9,10,p.goldDark);text('T',440,200,p.paper,5);
+    // Blue bottle, shoulder, tap, drip tray and stacked paper cups.
+    rect(496,200,14,13,'#699fb6');rect(498,198,10,3,'#9fc5d4');rect(498,201,3,9,'#b1d4de');rect(499,213,8,3,'#6590a1');
+    rect(493,216,20,22,p.paper);rect(496,220,14,9,'#aec1c2');rect(498,221,3,3,'#617d8a');rect(505,221,3,3,'#c58b70');rect(496,232,14,3,p.ink);
+    rect(517,217,6,10,p.woodEdge);rect(518,215,4,9,p.paper);rect(518,217,4,1,p.wallShade);rect(518,220,4,1,p.wallShade);
+    // Low lounge seating leaves a generous passage around the coffee counter.
+    rect(346,261,93,26,p.shadow);rect(348,258,89,22,p.olive);rect(350,254,85,10,p.rug);rect(347,262,8,20,p.olive);rect(430,262,8,20,p.olive);
+    rect(357,266,31,12,p.rug);rect(393,266,33,12,p.rug);rect(360,267,6,3,p.wall);rect(352,282,4,4,p.woodEdge);rect(431,282,4,4,p.woodEdge);
+    plant(537,272,p);rect(476,270,39,18,p.woodEdge);rect(478,268,35,16,p.woodLight);mug(482,273,p);rect(495,271,12,8,p.paper);rect(497,273,8,1,p.olive);
+    text('LOUNGE',369,256,p.paper,55);
+  }
+  function background(people,p,time,reducedMotion){
+    rect(0,0,WIDTH,HEIGHT,p.back);rect(10,12,556,304,p.edge);rect(14,16,548,296,p.floor);
+    for(let y=20;y<310;y+=13){rect(15,y,546,1,p.seam);for(let x=y%26?25:48;x<560;x+=43)rect(x,y+1,1,Math.min(12,311-y),p.seam);}
+    rect(14,140,548,37,p.hall);rect(14,141,548,2,p.tile);rect(14,174,548,2,p.tileLine);
+    rect(21,157,534,1,p.tileLine);for(let x=24;x<552;x+=27)rect(x,151,14,1,p.tile);
+    office(people[0],p,time,reducedMotion);office(BOSS,p,time,reducedMotion);
+    // An olive-and-gold foyer sign and notice board mark the shared space.
+    windowPane(233,22,110,p);rect(239,56,99,24,p.olive);rect(241,58,95,1,p.goldLight);text('GLAUXOS',260,64,p.goldLight,72);
+    rect(248,88,83,33,p.woodEdge);rect(251,91,77,27,p.goldDark);rect(256,95,18,18,p.paper);rect(280,94,18,20,'#d3bd85');rect(305,96,15,17,'#a7bc97');
+    rect(263,94,3,2,p.ink);rect(287,93,3,2,p.ink);rect(310,95,3,2,p.ink);rect(258,101,12,1,p.wallShade);rect(258,105,10,1,p.wallShade);
+    plant(217,108,p);plant(342,108,p);
+    rect(24,209,293,90,p.rug);rect(27,212,287,1,'#9aa985');rect(27,295,287,1,'#536a4a');
+    text('OPEN STUDIO',36,192,p.paper,145);
+    for(const person of people.slice(1)){desk(person.home.x-31,226,person,p,time,reducedMotion);label(person.name,person.home.x-27,286,60,p);rect(person.home.x+25,289,3,6,person.color);}
+    breakArea(p);
+  }
+  function ambient(person,time,reducedMotion){
+    if(person.owner||person.state!=='idle')return {...person.home,zone:person.owner||person.id==='main'?'office':'desk',walking:false,sip:false};
+    const anchor=person.break,offset=TEAM.findIndex(item=>item.id===person.id)*1800,phase=reducedMotion?0:(time+offset)%14000;
+    let dx=0,dy=0,walking=false;
+    if(!reducedMotion&&phase<2600){walking=true;const progress=phase/2600;
+      if(progress<.25)dx=progress*24;else if(progress<.5){dx=6;dy=(progress-.25)*12;}else if(progress<.75){dx=6-(progress-.5)*24;dy=3;}else dy=3-(progress-.75)*12;}
+    return {x:anchor.x+dx,y:anchor.y+dy,zone:'break',gate:anchor.gate,walking,sip:!reducedMotion&&['spike','athena'].includes(person.id)&&phase>5200&&phase<6900};
+  }
+  function entrance(person,point){
+    if(point.zone==='office')return [point,{x:person.gate,y:point.y},{x:person.gate,y:135},{x:person.gate,y:LANE}];
+    const gate=point.zone==='break'?person.break.gate:person.gate;
+    return [point,{x:gate,y:point.y},{x:gate,y:LANE}];
+  }
+  function routeFor(event,people,time){
     if(!event||!['delegation','handoff','report'].includes(event.kind))return null;
-    const from=plan.rooms.find(room=>!room.owner&&room.agent.id===event.from);
-    const to=event.to==null?(event.kind==='report'?plan.owner:null):plan.rooms.find(room=>!room.owner&&room.agent.id===event.to);
-    if(!from||!to||from===to)return null;
-    const points=[from.home,{x:from.door.x,y:from.home.y},from.door,{x:from.door.x,y:from.hall}];
-    if(from.floor!==to.floor)points.push({x:plan.trunk,y:from.hall},{x:plan.trunk,y:to.hall});
-    points.push({x:to.door.x,y:to.hall},to.door,{x:to.door.x,y:to.home.y},{x:to.home.x+17,y:to.home.y});
+    if(boundEvent&&(event===boundEvent||event.id!=null&&event.id===boundEvent.id)&&event.from===boundEvent.from&&event.to===boundEvent.to&&event.kind===boundEvent.kind)return boundRoute;
+    const from=people.find(person=>person.id===event.from),to=event.kind==='report'&&event.from==='main'&&event.to==null?BOSS:people.find(person=>person.id===event.to);
+    if(!from||!to||from.id===to.id||event.kind==='report'&&to!==BOSS)return null;
+    const start=ambient(from,time,false),recipient=ambient(to,time,false),visit={...recipient,x:recipient.x+(to.owner||to.id==='main'&&recipient.zone==='break'?-18:18)};
+    const exit=entrance(from,start),entry=entrance(to,visit).reverse(),points=[...exit,...entry];
     const length=points.slice(1).reduce((sum,point,i)=>sum+Math.abs(point.x-points[i].x)+Math.abs(point.y-points[i].y),0);
-    return {from,to,points,length,travel:Math.max(700,length*8)};
+    boundEvent=event;boundRoute={from,to,start,recipient,points,length,travel:Math.max(700,length*8)};return boundRoute;
   }
   function position(points,distance){
     for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i],length=Math.abs(b.x-a.x)+Math.abs(b.y-a.y);
       if(distance<=length&&length>0)return {x:a.x+(b.x-a.x)*distance/length,y:a.y+(b.y-a.y)*distance/length,side:Math.sign(b.x-a.x)||1};distance-=length;}
     return {...points.at(-1),side:1};
   }
-  function plant(x,y,p){
-    rect(x+3,y+11,8,6,p.woodEdge);rect(x+2,y+9,10,3,p.woodLight);rect(x+6,y+2,2,9,'#42664d');
-    rect(x,y+3,7,4,'#658967');rect(x+7,y,6,5,'#789a70');rect(x+5,y+5,9,4,'#4e7456');rect(x+1,y+2,3,2,'#9eb287');
-  }
-  function parcel(x,y,p){rect(x-1,y+1,10,8,p.woodEdge);rect(x,y,8,7,p.goldLight);rect(x+3,y,2,7,p.gold);rect(x,y+2,8,1,p.goldDark);}
-  function sprite(x,y,color,{walking=false,working=false,frame=0,owner=false,carrying=false,side=1}={},p){
-    x=Math.round(x);y=Math.round(y);const step=walking?(frame%2?1:-1):0,hand=working&&frame%2?1:0;
-    rect(x-7,y+11,15,3,p.shadow);rect(x-4,y+5,3,7+step,'#38383c');rect(x+2,y+5,3,7-step,'#38383c');
-    rect(x-5,y+11+step,4,2,p.ink);rect(x+2,y+11-step,4,2,p.ink);rect(x-5,y-3,11,10,color);
-    rect(x-7,y-1+hand,2,6,'#d6a77c');rect(x+6,y-1-hand,2,6,'#d6a77c');rect(x-2,y-5,5,3,'#d6a77c');
-    rect(x-4,y-12,9,8,'#e2b78b');rect(x-5,y-13,10,3,owner?'#b9ac92':'#493937');rect(x-5,y-11,2,4,owner?'#b9ac92':'#493937');
-    rect(x-2,y-8,1,1,p.ink);rect(x+3,y-8,1,1,p.ink);rect(x,y-4,2,1,'#ba815f');rect(x-2,y-2,5,2,owner?p.goldLight:'#d4c8b2');
-    if(owner){rect(x,y,1,5,p.goldLight);rect(x-7,y-10,2,3,p.goldDark);rect(x+5,y-10,2,3,p.goldDark);}
-    if(carrying)parcel(x+(side<0?-13:7),y+1,p);
-  }
-  function room(room,p,time,reducedMotion,moving){
-    const {x,y,w,h,owner,agent}=room,working=agent.state==='working',color=COLORS[hash(agent.id)%COLORS.length];
-    rect(x+2,y+5,w,h,p.shadow);rect(x,y,w,h,p.edge);rect(x+4,y+5,w-8,h-9,owner?p.goldDark:p.floor);
-    for(let dy=13;dy<h-4;dy+=12){rect(x+4,y+dy,w-8,1,p.seam);for(let dx=(dy%24?17:36);dx<w-8;dx+=39)rect(x+dx,y+dy+1,1,11,p.seam);}
-    if(owner){rect(x+16,y+66,w-32,29,p.gold);rect(x+19,y+69,w-38,23,p.goldLight);rect(x+23,y+73,w-46,15,p.gold);}
-    else {rect(x+20,y+67,w-40,24,p.rug);rect(x+23,y+70,w-46,1,'#a0afa0');rect(x+23,y+87,w-46,1,'#647e77');}
-    rect(x+1,y+1,w-2,8,owner?p.gold:p.wall);rect(x+1,y+1,w-2,2,owner?p.goldLight:p.wallTop);
-    rect(x+1,y+9,3,h-13,p.wallShade);rect(x+w-4,y+9,3,h-13,p.wallShade);rect(x,y+h-5,w,5,owner?p.gold:p.wall);
-    // Window, two panes and sill. A cutaway wall leaves the interior visible.
-    rect(x+12,y+12,36,21,p.woodEdge);rect(x+14,y+14,32,15,p.glass);rect(x+15,y+15,29,2,p.glassLight);
-    rect(x+22,y+18,3,8,p.glassLight);rect(x+31,y+14,2,16,p.wall);rect(x+11,y+30,38,3,owner?p.goldLight:p.wallTop);
-    // Shelves, books and a small framed print give each office a lived-in edge.
-    rect(x+w-37,y+13,24,21,p.woodEdge);rect(x+w-35,y+15,20,7,p.woodLight);rect(x+w-35,y+25,20,7,p.woodLight);
-    for(let i=0;i<4;i++){rect(x+w-34+i*4,y+15+(i%2),3,6-i%2,COLORS[(hash(agent.id)+i)%COLORS.length]);rect(x+w-33+i*4,y+26,2,5,p.paper);}
-    const deskX=room.home.x-29,deskY=y+43;
-    rect(deskX+3,deskY+17,4,12,p.woodEdge);rect(deskX+49,deskY+17,4,12,p.woodEdge);rect(deskX-1,deskY+2,58,19,p.woodEdge);
-    rect(deskX,deskY,56,17,owner?p.goldLight:p.woodLight);rect(deskX+2,deskY+2,52,1,owner?'#fff0ba':'#d3ad78');
-    rect(deskX+16,deskY-10,24,16,p.ink);rect(deskX+18,deskY-8,20,11,working?'#425e57':'#40505a');
-    rect(deskX+26,deskY+6,4,3,p.ink);rect(deskX+23,deskY+9,10,2,p.ink);rect(deskX+18,deskY+12,22,3,p.paper);
-    if(working){const shift=reducedMotion?0:Math.floor(time/400)%3;rect(deskX+20,deskY-5,8+shift*2,1,p.green);rect(deskX+20,deskY-2,13,1,'#a3c3a2');rect(deskX+20,deskY+1,5+shift,1,p.green);}
-    else {rect(deskX+22,deskY-4,11,1,p.glass);rect(deskX+22,deskY-1,7,1,p.glass);}
-    rect(deskX+5,deskY+6,6,7,p.paper);rect(deskX+11,deskY+7,2,4,p.paper);rect(deskX+6,deskY+6,4,2,p.woodEdge);
-    rect(room.home.x-7,y+70,15,14,owner?'#715239':'#5b6664');rect(room.home.x-8,y+79,17,4,owner?p.goldDark:'#465653');
-    plant(x+8,y+h-34,p);if(owner){plant(x+11,y+42,p);rect(x+55,y+16,14,11,p.goldDark);rect(x+57,y+18,10,7,p.goldLight);rect(x+60,y+19,4,5,p.gold);}
-    // A real opening connects each room to the central corridor.
-    const doorY=room.bottom?y:y+h-5;rect(room.door.x-8,doorY,17,6,p.hall);rect(room.door.x-9,doorY,2,6,p.woodEdge);rect(room.door.x+8,doorY,2,6,p.woodEdge);
-    if(room.bottom)rect(room.door.x-7,y+6,14,2,p.tile);else rect(room.door.x-7,y+h-7,14,2,p.tile);
-    if(room!==moving)sprite(room.home.x,room.home.y,owner?'#806550':color,{owner,working:working&&!reducedMotion,frame:Math.floor(time/360)},p);
-    const max=w-60;rect(x+26,y+h-18,max,11,owner?p.goldLight:p.paper);text(owner?'OWNER':agent.name||agent.id,x+29,y+h-16,p.ink,max-6);
-    rect(x+17,y+h-15,4,4,owner?p.goldLight:working?p.green:agent.state==='idle'?p.paper:p.wallShade);
-  }
-  function draw({agents=[],event=null,elapsedMs=0,reducedMotion=false,theme='dark'}={}){
-    const plan=layout(agents),p=palettes[theme==='light'?'light':'dark'],trip=route(event,plan),time=Math.max(0,Number(elapsedMs)||0);
-    if(canvas.width!==plan.width||canvas.height!==plan.height){canvas.width=plan.width;canvas.height=plan.height;}
-    ctx.imageSmoothingEnabled=false;rect(0,0,plan.width,plan.height,p.back);
-    rect(18,14,plan.width-36,2,p.wallShade);rect(24,14,20,2,p.gold);rect(plan.width-44,14,20,2,p.gold);
-    // Hallways are continuous; the right edge joins additional floors.
-    rect(10,25,plan.width-20,plan.height-33,p.edge);rect(14,29,plan.width-28,plan.height-41,p.hall);
-    for(let floor=0;floor<plan.floors;floor++){
-      const y=30+floor*292;rect(14,y+116,plan.width-28,40,p.hall);
-      for(let x=18;x<plan.width-18;x+=16){rect(x,y+118,14,15,p.tile);rect(x+7,y+135,14,15,p.tile);}
-      rect(15,y+116,plan.width-30,2,p.tileLine);rect(15,y+154,plan.width-30,2,p.tileLine);
-      text('LEVEL '+String(floor+1).padStart(2,'0'),23,y+132,p.woodEdge);
-      if(floor<plan.floors-1){rect(plan.trunk-13,y+158,25,132,p.wallShade);for(let step=0;step<13;step++)rect(plan.trunk-10,y+163+step*9,19,4,p.wallTop);rect(14,y+277,plan.width-65,9,p.edge);}
-      rect(plan.width-23,y+14,9,24,p.woodEdge);rect(plan.width-21,y+16,5,19,p.glass);rect(plan.width-21,y+25,5,2,p.wall);rect(plan.width-24,y+37,11,3,p.wallTop);
+  function draw({agents=[],event=null,elapsedMs=0,timeMs=0,reducedMotion=false,theme='dark'}={}){
+    const people=roster(agents),p=palettes[theme==='light'?'light':'dark'],time=clock(timeMs),elapsed=clock(elapsedMs),trip=routeFor(event,people,time);
+    if(canvas.width!==WIDTH||canvas.height!==HEIGHT){canvas.width=WIDTH;canvas.height=HEIGHT;}
+    ctx.imageSmoothingEnabled=false;background(people,p,time,reducedMotion);
+    const running=trip&&!reducedMotion&&elapsed<350+trip.travel*2+1000;
+    const actors=people.map(person=>({person,point:running&&trip.to.id===person.id?{...trip.recipient,walking:false,sip:false}:ambient(person,time,reducedMotion)}));
+    actors.push({person:BOSS,point:ambient(BOSS,time,true)});
+    for(const {person,point} of actors.filter(actor=>!running||actor.person.id!==trip.from.id).sort((a,b)=>a.point.y-b.point.y)){
+      const idlePose=person.state==='idle'&&!reducedMotion&&!point.walking?[0,1,0,-1][Math.floor(time/850)%4]:0;
+      sprite(point,person,{working:person.state==='working'&&!reducedMotion,walking:point.walking,sip:point.sip,idlePose,frame:Math.floor(time/180)},p);
     }
-    const moving=trip&&!reducedMotion&&time<350+trip.travel*2+900?trip.from:null;
-    plan.rooms.forEach(item=>room(item,p,time,reducedMotion,moving));
     if(trip){
-      const progress=time-350,outbound=progress<trip.travel,arrived=progress>=trip.travel,returning=progress>=trip.travel+900;
-      if(reducedMotion||arrived)parcel(trip.to.home.x+10,trip.to.home.y+4,p);
-      if(moving){const traveled=outbound?Math.max(0,progress)/trip.travel:!returning?1:1-(progress-trip.travel-900)/trip.travel;
-        const point=position(trip.points,Math.min(1,Math.max(0,traveled))*trip.length);
-        sprite(point.x,point.y,COLORS[hash(trip.from.agent.id)%COLORS.length],{walking:progress>0&&(outbound||returning),frame:Math.floor(time/150),carrying:outbound,side:returning?-point.side:point.side},p);}
+      const progress=elapsed-350,outbound=progress<trip.travel,arrived=progress>=trip.travel,returning=progress>=trip.travel+1000;
+      if(reducedMotion){const target=ambient(trip.to,time,true);parcel(target.x+10,target.y+4,p);}
+      else if(arrived)parcel(trip.recipient.x+10,trip.recipient.y+4,p);
+      if(running){const fraction=outbound?Math.max(0,progress)/trip.travel:!returning?1:1-(progress-trip.travel-1000)/trip.travel;
+        const point=position(trip.points,Math.min(1,Math.max(0,fraction))*trip.length);
+        sprite(point,trip.from,{walking:progress>0&&(outbound||returning),frame:Math.floor(elapsed/150),carrying:outbound,side:returning?-point.side:point.side},p);}
     }
   }
-  return {draw,duration(event,agents){const trip=route(event,layout(agents));return trip?Math.ceil(350+trip.travel*2+900):0;}};
+  return {draw,duration(event,agents,timeMs=0){const trip=routeFor(event,roster(agents),clock(timeMs));return trip?Math.ceil(350+trip.travel*2+1000):0;}};
 }

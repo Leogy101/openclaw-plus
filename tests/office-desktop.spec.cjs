@@ -35,7 +35,10 @@ delete env.ELECTRON_RUN_AS_NODE;
           { id: 'gemini', name: 'Gemini', state: 'unknown' },
           { id: 'chatgpt', name: 'ChatGPT', state: 'working' },
         ],
-        events: [{ id: 'historical-report', kind: 'report', from: 'main', to: null, at: Date.now() - 60000 }],
+        events: [
+          { id: 'historical-report', kind: 'report', from: 'main', to: null, at: Date.now() - 60000 },
+          { id: 'outside-cast', kind: 'handoff', from: 'chatgpt', to: 'main', at: Date.now() - 1000 },
+        ],
       },
     };
     state.publish = event => send('gateway:event', event);
@@ -86,6 +89,7 @@ delete env.ELECTRON_RUN_AS_NODE;
   const status = kind => page.locator(`.office-status[data-kind="${kind}"]`);
   const animated = kind => page.locator(`.office-status[data-kind="${kind}"][data-animating="true"]`);
   const staticStatus = kind => page.locator(`.office-status[data-kind="${kind}"][data-animating="false"]`);
+  const canvasFrame = () => page.locator('.office-canvas').evaluate(canvas => canvas.toDataURL());
   const capture = async (file, description) => {
     const png = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64'));
     fs.writeFileSync(path.join(evidence, file), Buffer.from(png, 'base64'));
@@ -112,10 +116,11 @@ delete env.ELECTRON_RUN_AS_NODE;
       await menu('view:Office');
       await page.locator('.office-connection[data-state="live"]').waitFor();
       await staticStatus('report').waitFor();
-      assert.equal(await page.locator('.office-agent').count(), 7);
-      assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 3);
-      assert.equal(await page.locator('.office-agent[data-state="unknown"]').count(), 2);
-      assert.match(await status('report').textContent(), /Tom.*Your office.*Final reply recorded/s);
+      assert.ok(await page.getByRole('heading', { name: 'GlauxOS Office' }).isVisible());
+      assert.deepEqual(await page.locator('.office-roster strong').allTextContents(), ['The Boss', 'Tom', 'Spike', 'Athena', 'Goose']);
+      assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 2);
+      assert.equal(await page.locator('.office-agent[data-state="unknown"]').count(), 1);
+      assert.match(await status('report').textContent(), /Tom.*The Boss.*Final reply recorded/s);
       assert.match(await page.locator('.office-note').textContent(), /partial/i);
       const canvas = await page.locator('.office-stage canvas').boundingBox();
       assert.ok(canvas && canvas.width > 200 && canvas.height > 100, 'scene must occupy visible space');
@@ -124,6 +129,32 @@ delete env.ELECTRON_RUN_AS_NODE;
       assert.equal(await page.locator('#toggle-terminal').isVisible(), false);
       await page.evaluate(() => { window.__officeCanvas = document.querySelector('.office-stage canvas'); });
       await capture('office-history-dark-1440.png', 'Synthetic office roster with a historical final reply; no replay animation');
+    });
+
+    await check('Idle characters move around the break area using only the existing observation', async () => {
+      const saved = await app.evaluate(() => {
+        const agents = globalThis.__officeFixture.projection.agents;
+        const initial = structuredClone(agents);
+        for (const agent of agents) agent.state = agent.id === 'goose' ? 'idle' : 'unknown';
+        return initial;
+      });
+      await refresh();
+      await page.locator('.office-agent[data-state="idle"]').filter({ hasText: 'Goose' }).waitFor();
+      assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 0);
+      const before = await officeCount();
+      const first = await canvasFrame();
+      await page.waitForFunction(previous => document.querySelector('.office-canvas').toDataURL() !== previous, first, { polling: 120, timeout: 5000 });
+      assert.equal(await officeCount(), before, 'ambient activity must not trigger Office reads');
+      await capture('office-break-dark-1440.png', 'Goose takes a break while the other agents have unknown activity');
+      await app.evaluate(() => { globalThis.__officeFixture.projection.agents.find(agent => agent.id === 'goose').state = 'unknown'; });
+      await refresh();
+      await page.waitForFunction(() => document.querySelectorAll('.office-agent[data-state="unknown"]').length === 4);
+      const stationary = await canvasFrame();
+      await page.waitForTimeout(450);
+      assert.equal(await canvasFrame(), stationary, 'unknown activity must not animate a break');
+      await app.evaluate((_, agents) => { globalThis.__officeFixture.projection.agents = agents; }, saved);
+      await refresh();
+      await page.locator('.office-agent[data-state="working"]').filter({ hasText: 'Spike' }).waitFor();
     });
 
     await check('A fresh delegation animates once and unchanged refreshes preserve the scene', async () => {
@@ -136,6 +167,10 @@ delete env.ELECTRON_RUN_AS_NODE;
       await refresh();
       await page.waitForTimeout(150);
       assert.equal(await animated('delegation').count(), 0, 'a previously seen event must not replay');
+      await refresh({ id: 'hidden-handoff', kind: 'handoff', from: 'spike', to: 'chatgpt' });
+      await page.waitForTimeout(150);
+      assert.equal(await animated('handoff').count(), 0, 'a route outside the visible team must not play');
+      assert.match(await status('delegation').textContent(), /Tom.*Spike/);
       assert.equal(await page.evaluate(() => window.__officeCanvas === document.querySelector('.office-stage canvas')), true);
     });
 
@@ -153,7 +188,7 @@ delete env.ELECTRON_RUN_AS_NODE;
       await page.waitForFunction(() => innerWidth === 880);
       await refresh({ id: 'report-1', kind: 'report', from: 'main', to: null });
       await animated('report').waitFor();
-      assert.match(await status('report').textContent(), /Tom.*Your office.*Final reply recorded/s);
+      assert.match(await status('report').textContent(), /Tom.*The Boss.*Final reply recorded/s);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       assert.equal(await page.locator('.office-page').evaluate(node => node.scrollWidth > node.clientWidth), false);
       const layout = await page.locator('.office-stage').evaluate(node => {
@@ -162,9 +197,16 @@ delete env.ELECTRON_RUN_AS_NODE;
       });
       assert.ok(layout.cardLeft >= layout.stageLeft - 1 && layout.cardRight <= layout.stageRight + 1, 'status card must fit the scene');
       await page.waitForTimeout(2500);
-      await capture('office-report-light-880.png', 'Synthetic Tom final reply returning to Your office at narrow width');
+      await capture('office-report-light-880.png', 'Synthetic Tom final reply arriving at The Boss’s room');
       await menu('theme:dark');
       await capture('office-report-dark-880.png', 'The same synthetic final reply in the narrow dark layout');
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1.5));
+      await page.waitForFunction(() => innerWidth < 600);
+      assert.equal(await page.locator('.office-page').evaluate(node => node.scrollWidth > node.clientWidth), false);
+      assert.equal(await page.locator('.office-stage').evaluate(node => node.scrollWidth > node.clientWidth + 1), false);
+      await capture('office-zoom-dark-880.png', 'The open plan scaled to a narrow viewport at 150% zoom');
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.setZoomFactor(1));
+      await page.waitForFunction(() => innerWidth === 880);
     });
 
     await check('Reduced motion keeps the canvas stationary while retaining a readable event receipt', async () => {
@@ -186,7 +228,7 @@ delete env.ELECTRON_RUN_AS_NODE;
       const beforeExpiry = await officeCount();
       await page.locator('.office-connection[data-state="stale"]').waitFor({ timeout: 5000 });
       assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 0);
-      assert.equal(await page.locator('.office-agent[data-state="unknown"]').count(), 7);
+      assert.equal(await page.locator('.office-agent[data-state="unknown"]').count(), 4);
       assert.equal(await officeCount(), beforeExpiry, 'freshness expiry must not poll the backend');
       await refresh({ id: 'disconnect-handoff', kind: 'handoff', from: 'spike', to: 'athena' });
       await animated('handoff').waitFor();
@@ -194,15 +236,22 @@ delete env.ELECTRON_RUN_AS_NODE;
       await page.locator('.office-connection[data-state="offline"]').waitFor();
       assert.equal(await page.locator('.office-status[data-animating="true"]').count(), 0);
       assert.equal(await page.locator('.office-agent[data-state="working"]').count(), 0);
+      const first = await canvasFrame();
+      await page.waitForTimeout(400);
+      assert.equal(await canvasFrame(), first, 'disconnected cast must remain stationary');
       await capture('office-disconnected-dark-880.png', 'Synthetic disconnected observation; no working or transfer animation');
       await publish({ kind: 'connection', connection: { status: 'connected', label: 'Fixture gateway' } });
       await page.locator('.office-connection[data-state="live"]').waitFor();
     });
 
-    await check('Agent labels are text and leaving Office stops its reads while preserving the conversation', async () => {
-      await app.evaluate(() => { globalThis.__officeFixture.projection.agents[6].name = '<img src=x onerror="window.officeIntruded=true">'; });
+    await check('The cast uses its fixed names and leaving Office preserves the conversation', async () => {
+      await app.evaluate(() => {
+        const main = globalThis.__officeFixture.projection.agents.find(agent => agent.id === 'main');
+        main.name = '<img src=x onerror="window.officeIntruded=true">';
+        main.state = 'working';
+      });
       await refresh();
-      await page.locator('.office-agent strong').filter({ hasText: '<img src=x onerror=' }).waitFor();
+      await page.locator('.office-agent[data-state="working"]').filter({ hasText: 'Tom' }).waitFor();
       assert.equal(await page.locator('.office-page img,.office-page script').count(), 0);
       assert.equal(await page.evaluate(() => window.officeIntruded), undefined);
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1440, 1000));
