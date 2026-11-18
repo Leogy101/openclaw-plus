@@ -34,12 +34,28 @@ export function createOfficeScene(canvas){
   if(!ctx)throw new Error('The Office illustration needs a canvas context.');
   let boundEvent=null,boundRoute=null;
   const rect=(x,y,w,h,color)=>{ctx.fillStyle=color;ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));};
-  function text(value,x,y,color,maxWidth=Infinity){
-    const label=String(value??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toUpperCase();let cursor=x;
-    for(const letter of label){const rows=(GLYPHS[letter]||GLYPHS['?']).split('/'),width=rows[0].length;if(cursor+width>x+maxWidth)break;
-      rows.forEach((row,dy)=>[...row].forEach((pixel,dx)=>{if(pixel==='1')rect(cursor+dx,y+dy,1,1,color);}));cursor+=width+1;}
+  function text(value,x,y,color,maxWidth,alignment='left'){
+    const label=String(value??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+    const letters=[];
+    let width=0;
+    for(const letter of label){
+      const rows=(GLYPHS[letter]||GLYPHS['?']).split('/');
+      const offset=letters.length ? width+1 : 0;
+      if(offset+rows[0].length>maxWidth)break;
+      letters.push({rows,offset});
+      width=offset+rows[0].length;
+    }
+    const start=alignment==='center' ? x+Math.floor((maxWidth-width)/2) : x;
+    for(const {rows,offset} of letters){
+      rows.forEach((row,dy)=>[...row].forEach((pixel,dx)=>{
+        if(pixel==='1')rect(start+offset+dx,y+dy,1,1,color);
+      }));
+    }
   }
-  function label(value,x,y,width,p,color=p.paper){rect(x,y,width,12,color);text(value,x+4,y+3,p.ink,width-8);}
+  function label(value,x,y,width,p,color=p.paper){
+    rect(x,y,width,12,color);
+    text(value,x+4,y+3,p.ink,width-8,'center');
+  }
   function plant(x,y,p,large=false){
     const scale=large?2:1;
     rect(x+3*scale,y+11*scale,8*scale,6*scale,p.woodEdge);rect(x+2*scale,y+9*scale,10*scale,3*scale,p.woodLight);
@@ -84,10 +100,10 @@ export function createOfficeScene(canvas){
     rect(x+1,y+1,w-2,8,boss?p.gold:p.wall);rect(x+1,y+1,w-2,2,boss?p.goldLight:p.wallTop);
     rect(x+1,y+9,3,h-13,p.wallShade);rect(x+w-4,y+9,3,h-13,p.wallShade);rect(x,y+h-5,w,5,boss?p.gold:p.wall);
     windowPane(x+12,y+13,54,p);shelves(x+w-43,y+13,p);
+    if(boss){rect(x+88,y+15,20,17,p.goldDark);rect(x+90,y+17,16,13,p.goldLight);rect(x+95,y+19,6,9,p.gold);}
     rect(person.home.x-38,y+67,80,32,boss?p.gold:p.rug);rect(person.home.x-35,y+70,74,26,boss?p.goldLight:p.rug);
     if(boss)rect(person.home.x-31,y+74,66,18,p.gold);
     desk(person.home.x-31,y+43,person,p,time,reducedMotion,boss);plant(boss?x+w-24:x+9,y+81,p);
-    if(boss){rect(x+88,y+15,20,17,p.goldDark);rect(x+90,y+17,16,13,p.goldLight);rect(x+95,y+19,6,9,p.gold);}
     const door=person.gate;rect(door-10,y+h-5,21,6,p.hall);rect(door-11,y+h-5,2,6,p.woodEdge);rect(door+10,y+h-5,2,6,p.woodEdge);rect(door-9,y+h-7,19,2,p.tile);
     // Nameplates sit away from each doorway; only these two rooms have walls.
     label(boss?'THE BOSS':'TOM',boss?448:43,y+h-18,boss?75:54,p,boss?p.goldLight:p.paper);
@@ -95,7 +111,6 @@ export function createOfficeScene(canvas){
   function breakArea(p){
     // A change in floor finish, not a partition: the whole lower floor stays open.
     rect(340,184,215,124,p.hall);for(let y=185;y<303;y+=16)for(let x=342;x<548;x+=16)rect(x,y,14,14,p.tile);
-    label('COFFEE',363,184,69,p);label('WATER',483,184,63,p);
     rect(359,211,95,20,p.woodEdge);rect(361,213,91,16,p.woodLight);rect(357,208,99,5,p.paper);
     for(let i=0;i<3;i++){rect(363+i*29,215,26,12,p.wood);rect(373+i*29,217,6,1,p.goldLight);}
     // Drip machine, dark coffee pot, handle, hotplate and three ceramic mugs.
@@ -110,7 +125,6 @@ export function createOfficeScene(canvas){
     rect(346,261,93,26,p.shadow);rect(348,258,89,22,p.olive);rect(350,254,85,10,p.rug);rect(347,262,8,20,p.olive);rect(430,262,8,20,p.olive);
     rect(357,266,31,12,p.rug);rect(393,266,33,12,p.rug);rect(360,267,6,3,p.wall);rect(352,282,4,4,p.woodEdge);rect(431,282,4,4,p.woodEdge);
     plant(537,272,p);rect(476,270,39,18,p.woodEdge);rect(478,268,35,16,p.woodLight);mug(482,273,p);rect(495,271,12,8,p.paper);rect(497,273,8,1,p.olive);
-    text('LOUNGE',369,256,p.paper,55);
   }
   function background(people,p,time,reducedMotion){
     rect(0,0,WIDTH,HEIGHT,p.back);rect(10,12,556,304,p.edge);rect(14,16,548,296,p.floor);
@@ -119,7 +133,7 @@ export function createOfficeScene(canvas){
     rect(21,157,534,1,p.tileLine);for(let x=24;x<552;x+=27)rect(x,151,14,1,p.tile);
     office(people[0],p,time,reducedMotion);office(BOSS,p,time,reducedMotion);
     // An olive-and-gold foyer sign and notice board mark the shared space.
-    windowPane(233,22,110,p);rect(239,56,99,24,p.olive);rect(241,58,95,1,p.goldLight);text('GLAUXOS',260,64,p.goldLight,72);
+    windowPane(233,22,110,p);rect(239,56,99,24,p.olive);rect(241,58,95,1,p.goldLight);text('GLAUXOS',239,64,p.goldLight,99,'center');
     rect(248,88,83,33,p.woodEdge);rect(251,91,77,27,p.goldDark);rect(256,95,18,18,p.paper);rect(280,94,18,20,'#d3bd85');rect(305,96,15,17,'#a7bc97');
     rect(263,94,3,2,p.ink);rect(287,93,3,2,p.ink);rect(310,95,3,2,p.ink);rect(258,101,12,1,p.wallShade);rect(258,105,10,1,p.wallShade);
     plant(217,108,p);plant(342,108,p);
